@@ -1,0 +1,69 @@
+.domTicketCard {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: 197px;
+  height: 43px;
+  border-radius: 5px;
+  background: #fff;
+  font-family: Onest, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.domTicketCard__header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  height: 17px;
+  padding-right: 4px;
+  background: #f8eadb;
+}
+
+.domTicketCard__id {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  color: #b19797;
+}
+
+.domTicketCard__body {
+  display: flex;
+  flex-flow: row;
+  flex-shrink: 0;
+  align-items: center;
+  box-sizing: border-box;
+  height: 26px;
+  padding: 1.5px 0;
+  background: linear-gradient(180deg, #fff 0%, #f3eae0 100%);
+}
+
+.domTicketCard__cell {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 23px;
+  margin-top: 1px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  color: #715050;
+}
+
+.domTicketCard__separator {
+  flex-shrink: 0;
+  width: 1px;
+  height: 12px;
+  border-radius: 2px;
+  background: rgb(177 151 151 / 50%);
+}

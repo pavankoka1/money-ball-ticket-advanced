@@ -1,0 +1,68 @@
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.controls__group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.controls h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.controls__subtitle {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.controls__label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.controls__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.controls__buttons button {
+  padding: 0.5rem 0.875rem;
+  border: 1px solid #3f3f46;
+  border-radius: 0.5rem;
+  background: #18181b;
+  color: #fafafa;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.controls__buttons button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.controls__buttonPerf {
+  border-color: #f59e0b !important;
+  color: #fde68a !important;
+}
+
+.controls__status {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.controls__bundles {
+  margin-top: 0.25rem;
+}
