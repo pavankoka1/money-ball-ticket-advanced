@@ -17,11 +17,7 @@ export const HybridSdrGrid = forwardRef<HybridSdrHandle>(function HybridSdrGrid(
     animCanvasRef,
     contentHeight,
     ticketCount,
-    domPoolReady,
-    domPoolMountedCount,
     domOverlayRef,
-    domPoolEntries,
-    poolSlotRefs,
   } = useHybridSdrGrid({ handleRef: ref });
 
   const hasTickets = ticketCount > 0;
@@ -57,13 +53,7 @@ export const HybridSdrGrid = forwardRef<HybridSdrHandle>(function HybridSdrGrid(
               aria-hidden
             />
 
-            <TallGridDomOverlayPool
-              overlayRef={domOverlayRef}
-              poolReady={domPoolReady}
-              mountedSlotCount={domPoolMountedCount}
-              entries={domPoolEntries}
-              slotRefs={poolSlotRefs}
-            />
+            <TallGridDomOverlayPool overlayRef={domOverlayRef} />
           </div>
         ) : (
           <div className="hybrid-sdr__empty">

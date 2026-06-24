@@ -73,7 +73,7 @@ class TicketStoreClass extends EventBus {
       this.tickets[ticket.id] = {
         ticket,
         update: {
-          index: replace ? index : this.sortedIds.indexOf(ticket.id),
+          index: replace ? index : index,
           cellValues: ticket.cells.map((c) => c.value),
           cellIsCrown: ticket.cells.map((c) => c.type === "crown"),
           isWinning: ticket.isWinning,

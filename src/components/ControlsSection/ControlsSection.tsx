@@ -1,7 +1,7 @@
 import { BundleButtons } from "@/components/BundleButtons/BundleButtons";
 import { resetSdrSpriteCache } from "@/components/hybrid-sdr/canvas/sdrSprite";
 import { resetHybridTicketRenderCaches } from "@/components/hybrid-sdr/canvas/hybridTicketRenderer";
-import { createTickets } from "@/lib/createTicket";
+import { claimTicketsFromPool, resetTicketPool } from "@/lib/ticketPool";
 import { shuffleTickets } from "@/lib/shuffleTickets";
 import { MAX_TICKETS } from "@/types/ticket";
 import { useCallback, useEffect, useRef, type RefObject } from "react";
@@ -48,11 +48,12 @@ export default function ControlsSection({ view, hybridRef }: ControlsSectionProp
     const toAdd = Math.min(count, remaining);
     const startId = nextIdRef.current;
     nextIdRef.current += toAdd;
-    TicketStore.addTickets(createTickets(startId, toAdd));
+    TicketStore.addTickets(claimTicketsFromPool(toAdd, startId));
   }, []);
 
   const handleClear = useCallback(() => {
     TicketStore.reset();
+    resetTicketPool();
     resetHybridTicketRenderCaches();
     void resetSdrSpriteCache();
     nextIdRef.current = 1;

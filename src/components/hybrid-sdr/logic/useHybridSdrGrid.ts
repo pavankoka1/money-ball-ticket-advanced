@@ -1,5 +1,6 @@
 import { TicketStore } from "@/components/bingo-catalog/store/TicketStore";
-import { ensureHybridTicketRenderReady, scheduleWarmHybridDigitSprites } from "@/components/hybrid-sdr/canvas/hybridTicketRenderer";
+import { ensureHybridTicketRenderReady, prefetchHybridTextSprites, scheduleWarmHybridDigitSprites } from "@/components/hybrid-sdr/canvas/hybridTicketRenderer";
+import { getPoolTicketsForWarm } from "@/lib/ticketPool";
 import { ensureGridTicketFontsReady } from "@/lib/ticketRenderer";
 import { ensureTicketDisplayFontAtlases } from "@/lib/ticketDisplayAtlases";
 import {
@@ -31,7 +32,7 @@ import {
   type ForwardedRef,
   type RefObject,
 } from "react";
-import type { PoolTicketSlotHandle } from "../dom/PoolTicketSlot";
+import { DomPoolSlot } from "../dom/DomPoolSlot";
 import {
   ANIMATION_MS,
   type ActiveAnimation,
@@ -44,6 +45,7 @@ import { paintTiledTallCanvasSdrChunked } from "../canvas/paintTallCanvasSdr";
 import { resetSdrSpriteCache } from "../canvas/sdrSprite";
 import {
   createInitialDomPoolEntries,
+  DOM_POOL_MOUNT_BATCH_SIZE,
   HYBRID_DOM_OVERLAY_POOL_SIZE,
   updateDomPoolEntriesInPlace,
   type DomPoolEntry,
@@ -96,11 +98,7 @@ export type UseHybridSdrGridResult = {
   animCanvasRef: RefObject<HTMLCanvasElement | null>;
   contentHeight: number;
   ticketCount: number;
-  domPoolReady: boolean;
-  domPoolMountedCount: number;
   domOverlayRef: RefObject<HTMLDivElement | null>;
-  domPoolEntries: DomPoolEntry[];
-  poolSlotRefs: RefObject<(PoolTicketSlotHandle | null)[]>;
 };
 
 function getTicketsFromStore(): Ticket[] {
@@ -138,14 +136,15 @@ export function useHybridSdrGrid({
   const paintAbortRef = useRef<AbortController | null>(null);
   const tallPaintGenRef = useRef(0);
   const storeSyncCoalesceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const coalescedPaintRunningRef = useRef(false);
+  const coalescedPaintPendingRef = useRef(false);
   const domOverlayActiveRef = useRef(false);
   const domPoolMountCompleteRef = useRef(false);
   const domPoolMountPromiseRef = useRef<Promise<void> | null>(null);
   const domPoolEntriesRef = useRef<DomPoolEntry[]>(createInitialDomPoolEntries());
   const ticketByIdRef = useRef<ReadonlyMap<number, Ticket>>(new Map());
-  const poolSlotRefs = useRef<(PoolTicketSlotHandle | null)[]>(
-    Array.from({ length: HYBRID_DOM_OVERLAY_POOL_SIZE }, () => null),
-  );
+  const poolSlotRefs = useRef<DomPoolSlot[]>([]);
+  const domPoolMountResolveRef = useRef<(() => void) | null>(null);
   const modeRef = useRef<GridMode>("idle");
   const fontsReadyRef = useRef(false);
   const storeVersionRef = useRef(0);
@@ -153,8 +152,7 @@ export function useHybridSdrGrid({
   const gridEpochRef = useRef(0);
 
   const domPoolReadyRef = useRef(false);
-  const domPoolMountedCountRef = useRef(0);
-  const [domPoolUi, setDomPoolUi] = useState({ ready: false, mounted: 0 });
+  const [domPoolReady, setDomPoolReady] = useState(false);
   const [ticketCount, setTicketCount] = useState(0);
   const [contentHeight, setContentHeight] = useState(0);
   const [tileCount, setTileCount] = useState(1);
@@ -169,7 +167,7 @@ export function useHybridSdrGrid({
   }, []);
 
   const waitForTileCanvases = useCallback(async (expectedTiles: number) => {
-    for (let attempt = 0; attempt < 32; attempt++) {
+    for (let attempt = 0; attempt < 64; attempt++) {
       const count = tileCanvasRefs.current.filter(
         (c): c is HTMLCanvasElement => c !== null,
       ).length;
@@ -246,9 +244,15 @@ export function useHybridSdrGrid({
         syncTicketsFromStore();
         void ensureTicketDisplayFontAtlases();
         if (typeof requestIdleCallback !== "undefined") {
-          requestIdleCallback(() => scheduleWarmHybridDigitSprites(60), {
-            timeout: 12_000,
-          });
+          requestIdleCallback(
+            () => {
+              scheduleWarmHybridDigitSprites(60);
+              void prefetchHybridTextSprites(getPoolTicketsForWarm(120), {
+                chunkSize: 12,
+              });
+            },
+            { timeout: 12_000 },
+          );
         }
       })
       .catch(() => {
@@ -274,16 +278,83 @@ export function useHybridSdrGrid({
       return;
     }
 
-    domPoolMountPromiseRef.current = (async () => {
+    domPoolMountPromiseRef.current = new Promise<void>((resolve) => {
+      domPoolMountResolveRef.current = resolve;
+    });
+
+    if (!domPoolReadyRef.current) {
       domPoolReadyRef.current = true;
-      domPoolMountedCountRef.current = HYBRID_DOM_OVERLAY_POOL_SIZE;
-      setDomPoolUi({ ready: true, mounted: HYBRID_DOM_OVERLAY_POOL_SIZE });
-      await yieldFrame();
-      domPoolMountCompleteRef.current = true;
-      domPoolMountPromiseRef.current = null;
-    })();
+      setDomPoolReady(true);
+    }
 
     await domPoolMountPromiseRef.current;
+  }, []);
+
+  useEffect(() => {
+    if (!domPoolReady || domPoolMountCompleteRef.current) return;
+
+    let cancelled = false;
+
+    const mountPoolSlots = async () => {
+      for (let attempt = 0; attempt < 32; attempt++) {
+        if (cancelled) return;
+        if (domOverlayRef.current) break;
+        await yieldFrame();
+      }
+
+      const overlay = domOverlayRef.current;
+      if (!overlay || cancelled) return;
+
+      DomPoolSlot.initTemplate();
+      const slots: DomPoolSlot[] = [];
+
+      for (
+        let start = 0;
+        start < HYBRID_DOM_OVERLAY_POOL_SIZE;
+        start += DOM_POOL_MOUNT_BATCH_SIZE
+      ) {
+        if (cancelled) return;
+        const end = Math.min(
+          start + DOM_POOL_MOUNT_BATCH_SIZE,
+          HYBRID_DOM_OVERLAY_POOL_SIZE,
+        );
+        for (let i = start; i < end; i++) {
+          const slot = new DomPoolSlot();
+          slots[i] = slot;
+          overlay.appendChild(slot.dom);
+        }
+        if (end < HYBRID_DOM_OVERLAY_POOL_SIZE) {
+          await yieldFrame();
+        }
+      }
+
+      if (cancelled) return;
+
+      poolSlotRefs.current = slots;
+      domPoolMountCompleteRef.current = true;
+      domPoolMountPromiseRef.current = null;
+      applyPoolEntriesImperative();
+      domPoolMountResolveRef.current?.();
+      domPoolMountResolveRef.current = null;
+    };
+
+    void mountPoolSlots();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [domPoolReady, applyPoolEntriesImperative]);
+
+  useEffect(() => {
+    return () => {
+      const overlay = domOverlayRef.current;
+      if (overlay) {
+        while (overlay.firstChild) {
+          overlay.removeChild(overlay.firstChild);
+        }
+      }
+      poolSlotRefs.current = [];
+    };
   }, []);
 
   const clearCanvasElement = useCallback((canvas: HTMLCanvasElement) => {
@@ -306,16 +377,22 @@ export function useHybridSdrGrid({
   const resetDomPoolCompletely = useCallback(() => {
     domPoolMountCompleteRef.current = false;
     domPoolMountPromiseRef.current = null;
+    domPoolMountResolveRef.current = null;
     domPoolReadyRef.current = false;
-    domPoolMountedCountRef.current = 0;
-    setDomPoolUi({ ready: false, mounted: 0 });
+    setDomPoolReady(false);
     domOverlayActiveRef.current = false;
     setDomOverlayVisible(false);
     onDomOverlayChange?.({ active: false, domNodeCount: 0 });
+    const overlay = domOverlayRef.current;
+    if (overlay) {
+      while (overlay.firstChild) {
+        overlay.removeChild(overlay.firstChild);
+      }
+    }
+    poolSlotRefs.current = [];
     const entries = domPoolEntriesRef.current;
     for (let i = 0; i < HYBRID_DOM_OVERLAY_POOL_SIZE; i++) {
       entries[i].active = false;
-      poolSlotRefs.current[i]?.applyEntry(entries[i]);
     }
   }, [onDomOverlayChange, setDomOverlayVisible]);
 
@@ -333,6 +410,8 @@ export function useHybridSdrGrid({
       clearTimeout(storeSyncCoalesceRef.current);
       storeSyncCoalesceRef.current = null;
     }
+    coalescedPaintPendingRef.current = false;
+    coalescedPaintRunningRef.current = false;
     layoutRef.current = [];
     isScrollingRef.current = false;
     scrollTopRef.current = 0;
@@ -346,12 +425,12 @@ export function useHybridSdrGrid({
   }, [bumpGridEpoch, clearAllTileCanvases, resetDomPoolCompletely, setModeImperative]);
 
   const paintTallCanvas = useCallback(
-    async (options: PaintTallOptions = {}) => {
+    async (options: PaintTallOptions = {}): Promise<boolean> => {
     const container = scrollRef.current;
-    if (!container || !fontsReadyRef.current) return;
+    if (!container || !fontsReadyRef.current) return false;
 
     const cssWidth = cssWidthRef.current || getDrawableWidth(container);
-    if (cssWidth <= 0) return;
+    if (cssWidth <= 0) return false;
     cssWidthRef.current = cssWidth;
 
     const list = ticketsRef.current;
@@ -361,7 +440,7 @@ export function useHybridSdrGrid({
       clearAllTileCanvases();
       onPaintProgress?.(0, 0);
       onStatusText?.("Hybrid · idle");
-      return;
+      return true;
     }
 
     paintAbortRef.current?.abort();
@@ -398,7 +477,7 @@ export function useHybridSdrGrid({
           },
     });
 
-    if (!ok && isFullGrid) {
+    if ((!ok || generation !== tallPaintGenRef.current) && isFullGrid) {
       const retryTiles = await waitForTileCanvases(expectedTiles);
       ok = await paintTiledTallCanvasSdrChunked({
         tileCanvases: retryTiles,
@@ -421,6 +500,8 @@ export function useHybridSdrGrid({
         `SDR ${getSdrCompositorScale()}× · ${tileCanvases.length} tile(s) · ${total} tickets`,
       );
     }
+
+    return ok && generation === tallPaintGenRef.current;
   },
     [clearAllTileCanvases, onPaintProgress, onStatusText, waitForTileCanvases],
   );
@@ -473,17 +554,39 @@ export function useHybridSdrGrid({
 
       await paintTallCanvas({ fullClear: true });
       onPainted?.();
-      await yieldFrame();
 
-      addOverlayTimerRef.current = setTimeout(() => {
-        addOverlayTimerRef.current = null;
-        if (!animationRef.current && !isScrollingRef.current) {
+      if (!domOverlayActiveRef.current && !animationRef.current && !isScrollingRef.current) {
+        addOverlayTimerRef.current = setTimeout(() => {
+          addOverlayTimerRef.current = null;
           void rebindDomPool({ allowWhileScrolling: true });
-        }
-      }, TICKET_ADD_OVERLAY_DELAY_MS);
+        }, TICKET_ADD_OVERLAY_DELAY_MS);
+      }
     },
     [paintTallCanvas, rebindDomPool],
   );
+
+  /** One full-grid paint per coalesced burst; re-run if adds land during paint (20× CPU safe). */
+  const flushCoalescedPaint = useCallback(async () => {
+    if (coalescedPaintRunningRef.current) {
+      coalescedPaintPendingRef.current = true;
+      return;
+    }
+
+    coalescedPaintRunningRef.current = true;
+    try {
+      do {
+        coalescedPaintPendingRef.current = false;
+        commitGridUiState();
+        await yieldFrame();
+        await paintTallCanvas({ fullClear: true });
+      } while (coalescedPaintPendingRef.current);
+    } finally {
+      coalescedPaintRunningRef.current = false;
+      if (coalescedPaintPendingRef.current) {
+        void flushCoalescedPaint();
+      }
+    }
+  }, [commitGridUiState, paintTallCanvas]);
 
   const paintAnimFrame = useCallback(() => {
     const canvas = animCanvasRef.current;
@@ -674,6 +777,19 @@ export function useHybridSdrGrid({
     resetGridState();
   }, [resetGridState, syncTicketsFromStore]);
 
+  const showDomOverlayImmediate = useCallback(async (addedCount: number) => {
+    commitGridUiState();
+    await yieldFrame();
+
+    if (addedCount > 0) {
+      const newTickets = ticketsRef.current.slice(0, addedCount);
+      void prefetchHybridTextSprites(newTickets, { chunkSize: 24 });
+    }
+
+    await ensureDomPoolMounted();
+    await rebindDomPool({ allowWhileScrolling: true });
+  }, [commitGridUiState, ensureDomPoolMounted, rebindDomPool]);
+
   const scheduleStoreSync = useCallback(() => {
     const prevTickets = ticketsRef.current;
     const prevCount = prevTickets.length;
@@ -689,6 +805,7 @@ export function useHybridSdrGrid({
     if (animationRef.current) return;
 
     const tickets = ticketsRef.current;
+    const addedCount = tickets.length - prevCount;
     const width =
       cssWidthRef.current ||
       (scrollRef.current ? getDrawableWidth(scrollRef.current) : 0);
@@ -697,27 +814,30 @@ export function useHybridSdrGrid({
     const layoutChanged = syncLayout(tickets, prevTickets);
     if (!layoutChanged && tickets.length === prevCount) return;
 
-    if (domOverlayActiveRef.current) {
+    if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
+
+    if (addedCount > 0) {
+      void showDomOverlayImmediate(addedCount);
+    } else if (domOverlayActiveRef.current) {
       hideDomOverlay();
     }
-    if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
 
     if (storeSyncCoalesceRef.current) {
       clearTimeout(storeSyncCoalesceRef.current);
     }
     storeSyncCoalesceRef.current = setTimeout(() => {
       storeSyncCoalesceRef.current = null;
-      commitGridUiState();
-      void (async () => {
-        await yieldFrame();
-        await runAfterTallPaint();
-      })();
+      void flushCoalescedPaint();
     }, STORE_SYNC_COALESCE_MS);
+
+    if (coalescedPaintRunningRef.current) {
+      coalescedPaintPendingRef.current = true;
+    }
   }, [
-    commitGridUiState,
     hideDomOverlay,
     resetGridState,
-    runAfterTallPaint,
+    flushCoalescedPaint,
+    showDomOverlayImmediate,
     syncLayout,
     syncTicketsFromStoreRefs,
   ]);
@@ -851,10 +971,6 @@ export function useHybridSdrGrid({
     animCanvasRef,
     contentHeight,
     ticketCount,
-    domPoolReady: domPoolUi.ready,
-    domPoolMountedCount: domPoolUi.mounted,
     domOverlayRef,
-    domPoolEntries: domPoolEntriesRef.current,
-    poolSlotRefs,
   };
 }
