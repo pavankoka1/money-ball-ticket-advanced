@@ -29,12 +29,23 @@ function syncTileCanvas(
   cssWidth: number,
   cssHeight: number,
   compositorScale: number,
+  tileIndex: number,
 ): CanvasRenderingContext2D | null {
   assertTileFitsPhysical(cssHeight, compositorScale);
   const w = Math.max(1, Math.round(cssWidth * compositorScale));
   const h = Math.max(1, Math.round(cssHeight * compositorScale));
+
+  const sizeChanged = canvas.width !== w || canvas.height !== h;
   if (canvas.width !== w) canvas.width = w;
   if (canvas.height !== h) canvas.height = h;
+
+  if (sizeChanged) {
+    const mb = (w * h * 4) / 1_048_576;
+    console.log(
+      `[tile canvas] tile=${tileIndex} css=${cssWidth}×${cssHeight}px  physical=${w}×${h}px  scale=${compositorScale.toFixed(2)}x  mem≈${mb.toFixed(2)}MB`,
+    );
+  }
+
   canvas.style.visibility = "visible";
   canvas.style.width = `${cssWidth}px`;
   canvas.style.height = `${cssHeight}px`;
@@ -138,7 +149,7 @@ export async function paintTiledTallCanvasSdrChunked({
       continue;
     }
 
-    const ctx = syncTileCanvas(canvas, cssWidth, plan.cssHeight, compositorScale);
+    const ctx = syncTileCanvas(canvas, cssWidth, plan.cssHeight, compositorScale, plan.tileIndex);
     if (!ctx) {
       if (slotsInTile.length > 0) missingCanvasForSlots = true;
       continue;

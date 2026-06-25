@@ -1,13 +1,11 @@
-/** DPR for backing-store sizing. Browser zoom updates this. */
+import { getDprOverride } from "@/lib/dprOverride";
+import { getDisplayScaleOverride } from "@/lib/displayScaleOverride";
+import { getPaintScaleOverride } from "@/lib/paintScaleOverride";
+
+/** DPR for backing-store sizing. Reads the user-selected override (default 1). */
 export const resolveTicketCanvasDpr = (): number => {
   if (typeof window === "undefined") return 1;
-
-  let dpr = window.devicePixelRatio || 1;
-  const vv = window.visualViewport;
-  if (vv && Math.abs(vv.scale - 1) > 0.01) {
-    dpr *= vv.scale;
-  }
-  return dpr;
+  return getDprOverride();
 };
 
 /** SDR floor — single backing-store scale on Linux/Windows (DPR=1). */
@@ -21,6 +19,8 @@ export const TICKET_SDR_DISPLAY_SCALE = 2;
 export const resolveTicketSdrDisplayScale = (
   dpr = resolveTicketCanvasDpr(),
 ): number => {
+  const override = getDisplayScaleOverride();
+  if (override !== null) return override;
   if (!isTicketSdrCanvas(dpr)) return 0;
   const zoomAware = Math.ceil(dpr * TICKET_SDR_DISPLAY_SCALE);
   const paintCap = resolveTicketChromeRenderScale(dpr);
@@ -57,10 +57,13 @@ export const resolveTicketChromeRenderScale = (
 export const resolveTicketCanvasPaintScale = (
   dpr = resolveTicketCanvasDpr(),
   mode: TicketCanvasQualityMode = "enhanced"
-): number =>
-  mode === "enhanced"
+): number => {
+  const override = getPaintScaleOverride();
+  if (override !== null) return override;
+  return mode === "enhanced"
     ? resolveTicketChromeRenderScale(dpr)
     : resolveTicketCanvasRenderScale(dpr);
+};
 
 /** Linux/Windows @ 1× DPR — huge backing store downscaled by the browser blurs chrome. */
 export const isTicketSdrCanvas = (dpr = resolveTicketCanvasDpr()): boolean =>

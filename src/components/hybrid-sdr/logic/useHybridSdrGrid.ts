@@ -66,6 +66,8 @@ type PaintTallOptions = {
 export type HybridSdrHandle = {
   removeBall: (ball: number) => void;
   shuffle: () => void;
+  /** Force a full clear + repaint of all tile canvases (e.g. after a DPR change). */
+  repaint: () => Promise<void>;
 };
 
 export type ScrollMetrics = {
@@ -726,7 +728,13 @@ export function useHybridSdrGrid({
     startAnimation(nextTickets, transitions, "cubic");
   }, [startAnimation]);
 
-  useImperativeHandle(handleRef, () => ({ removeBall, shuffle }), [removeBall, shuffle]);
+  const repaint = useCallback(async (): Promise<void> => {
+    commitGridUiState();
+    await yieldFrame();
+    await paintTallCanvas({ fullClear: true });
+  }, [commitGridUiState, paintTallCanvas]);
+
+  useImperativeHandle(handleRef, () => ({ removeBall, shuffle, repaint }), [removeBall, shuffle, repaint]);
 
   useEffect(() => {
     const worker = new Worker(

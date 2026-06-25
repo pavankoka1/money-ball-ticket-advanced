@@ -29,8 +29,13 @@ export function visualCenterToBaselineY(
  */
 export const DOM_MATCHED_LINE_BOX_BLEND = 0.7;
 
-/** Fine-tune canvas ink vs DOM (negative = shift canvas text up on screen). */
-export const DOM_MATCHED_TEXT_Y_NUDGE = -0.25;
+/**
+ * Fine-tune canvas ink vs DOM (negative = shift canvas text up on screen).
+ * At displayScale=2 each physical pixel = 0.5 CSS px, so even a 0.45 px
+ * logical error rounds to a visible 1-pixel shift. -0.75 centres numbers
+ * within the snapping window for the measured Onest metrics.
+ */
+export const DOM_MATCHED_TEXT_Y_NUDGE = -0.75;
 
 export function resolveDomMatchedMiddleAnchorY(
   metrics: TextMetrics,

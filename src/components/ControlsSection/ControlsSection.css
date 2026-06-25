@@ -66,3 +66,32 @@
 .controls__bundles {
   margin-top: 0.25rem;
 }
+
+.controls__dpr-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.controls__dpr-select {
+  padding: 0.4rem 0.75rem;
+  border: 1px solid #3f3f46;
+  border-radius: 0.5rem;
+  background: #18181b;
+  color: #fafafa;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  appearance: auto;
+}
+
+.controls__dpr-select:focus {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}
+
+.controls__dpr-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
