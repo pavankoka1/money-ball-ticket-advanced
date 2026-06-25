@@ -1,4 +1,8 @@
-import { TICKET_CELL_COUNT } from "@/lib/ticketDesign";
+import {
+  TICKET_CELL_COUNT,
+  TICKET_DESIGN_HEIGHT,
+  TICKET_DESIGN_WIDTH,
+} from "@/lib/ticketDesign";
 import type { DomPoolEntry } from "../lib/domPool";
 import styles from "./DomTicketCard.module.css";
 
@@ -63,6 +67,8 @@ export class DomPoolSlot {
     }
 
     this.dom.style.visibility = "visible";
+    this.dom.style.width = `${entry.cardWidth || TICKET_DESIGN_WIDTH}px`;
+    this.dom.style.height = `${TICKET_DESIGN_HEIGHT}px`;
     this.dom.style.transform = `translate3d(${entry.x}px, ${entry.y}px, 0)`;
     this.dom.dataset.ticketId = String(entry.ticket.id);
     this.idEl.textContent = String(entry.ticket.id);

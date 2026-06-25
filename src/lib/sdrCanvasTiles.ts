@@ -1,4 +1,5 @@
 import { ROW_GAP, ROW_HEIGHT, getTotalRows } from "@/types/ticket";
+import { getMaxTileCssHeight } from "@/lib/deviceMemoryBudget";
 
 /** Legacy cap — row alignment takes precedence. */
 export const SDR_TILE_MAX_CSS_HEIGHT = 3600;
@@ -16,11 +17,15 @@ export type SdrTilePlan = {
   cssHeight: number;
 };
 
-/** Keep each tile's physical backing within the browser's max texture side. */
+/**
+ * Keep each tile's physical backing within the browser's max texture side, and
+ * within the device's per-tile height budget (shorter on memory-constrained
+ * devices so a single canvas can't exceed the per-canvas memory cap).
+ */
 export function resolveSdrTileMaxCssHeight(compositorScale: number): number {
   const scale = Math.max(1, compositorScale);
   const capFromPhysical = Math.floor(MAX_PHYSICAL_SIDE / scale);
-  return Math.min(SDR_TILE_MAX_CSS_HEIGHT, capFromPhysical);
+  return Math.min(getMaxTileCssHeight(), capFromPhysical);
 }
 
 /** Max complete ticket rows per tile — never split a row across tiles. */
@@ -109,6 +114,62 @@ export function getSdrTileTopCss(
   compositorScale: number,
 ): number {
   return buildSdrTilePlan(ticketCount, compositorScale)[tileIndex]?.cssTop ?? 0;
+}
+
+/** Inclusive-exclusive tile index range kept resident for virtualization. */
+export type SdrTileWindow = { start: number; end: number };
+
+/**
+ * Window of tiles to keep resident: the tiles overlapping the viewport, expanded
+ * symmetrically until the window holds up to `maxTiles`. When `maxTiles` covers
+ * the whole grid the full range is returned (no virtualization).
+ */
+export function computeVisibleTileRange(
+  scrollTop: number,
+  viewportHeight: number,
+  ticketCount: number,
+  compositorScale: number,
+  maxTiles: number,
+): SdrTileWindow {
+  const plans = buildSdrTilePlan(ticketCount, compositorScale);
+  const tileCount = plans[0]?.tileCount ?? 1;
+
+  if (!Number.isFinite(maxTiles) || maxTiles >= tileCount) {
+    return { start: 0, end: tileCount };
+  }
+
+  const viewTop = scrollTop;
+  const viewBottom = scrollTop + viewportHeight;
+
+  let first = tileCount;
+  let last = -1;
+  for (const plan of plans) {
+    const top = plan.cssTop;
+    const bottom = plan.cssTop + plan.cssHeight;
+    if (bottom > viewTop && top < viewBottom) {
+      if (plan.tileIndex < first) first = plan.tileIndex;
+      if (plan.tileIndex > last) last = plan.tileIndex;
+    }
+  }
+  if (last < 0) {
+    first = 0;
+    last = 0;
+  }
+
+  let start = first;
+  let end = last + 1;
+  const cap = Math.max(1, Math.floor(maxTiles));
+  // Expand symmetrically (below first, then above) until we hit the cap.
+  while (end - start < cap) {
+    const canGrowBelow = start > 0;
+    const canGrowAbove = end < tileCount;
+    if (!canGrowBelow && !canGrowAbove) break;
+    if (canGrowBelow) start -= 1;
+    if (end - start >= cap) break;
+    if (canGrowAbove) end += 1;
+  }
+
+  return { start, end };
 }
 
 export function assertTileFitsPhysical(cssHeight: number, displayScale: number): void {

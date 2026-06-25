@@ -20,6 +20,7 @@
 .catalog {
   box-sizing: border-box;
   overflow: auto;
+  overflow-x: hidden;
   padding: 0.5rem;
   border: 1px solid #27272a;
   border-radius: 1.5rem;
@@ -29,6 +30,7 @@
   line-height: 0;
   scrollbar-width: thin;
   scrollbar-color: #3f3f46 #111113;
+  scrollbar-gutter: stable;
 }
 
 .catalog > * {

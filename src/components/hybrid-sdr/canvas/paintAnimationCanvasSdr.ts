@@ -36,6 +36,7 @@ function syncCanvas(
   if (canvas.height !== h) canvas.height = h;
   canvas.style.width = `${cssWidth}px`;
   canvas.style.height = `${cssHeight}px`;
+  canvas.style.maxWidth = "none";
   const ctx = canvas.getContext("2d", { alpha: true });
   if (!ctx) return null;
   ctx.setTransform(compositorScale, 0, 0, compositorScale, 0, 0);

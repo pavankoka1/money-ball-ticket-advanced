@@ -7,40 +7,47 @@
   border-radius: 5px;
   background: #fff;
   vertical-align: top;
+  font-family: Onest, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
 }
 
 .catalogTicket_winning {
   box-shadow: 0 0 0 1px rgb(251 191 36 / 55%);
 }
 
-.catalogTicket__id {
+.catalogTicket__header {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   justify-content: flex-end;
   height: 17px;
   padding-right: 4px;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  color: #b19797;
   background: #f8eadb;
 }
 
+.catalogTicket__id {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  color: #b19797;
+}
+
 .catalogTicket__body {
-  display: grid;
-  grid-template-columns: repeat(6, 32px);
-  column-gap: 1px;
+  display: flex;
+  flex-flow: row;
+  flex-shrink: 0;
+  align-items: center;
   box-sizing: border-box;
-  width: 197px;
   height: 26px;
   padding: 1.5px 0;
-  background: #fff;
+  background: linear-gradient(180deg, #fff 0%, #f3eae0 100%);
 }
 
 .catalogTicket__cell {
-  position: relative;
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   width: 32px;
@@ -49,7 +56,16 @@
   font-size: 18px;
   font-weight: 700;
   line-height: 1;
+  letter-spacing: 0;
   color: #715050;
+}
+
+.catalogTicket__separator {
+  flex-shrink: 0;
+  width: 1px;
+  height: 12px;
+  border-radius: 2px;
+  background: rgb(177 151 151 / 50%);
 }
 
 .catalogTicket__cell_crown {
@@ -60,17 +76,4 @@
   outline: 2px solid rgb(251 191 36 / 70%);
   outline-offset: -2px;
   border-radius: 4px;
-}
-
-.catalogTicket__cell:not(:first-child)::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: -1px;
-  width: 1px;
-  height: 12px;
-  border-radius: 2px;
-  background: rgb(177 151 151 / 50%);
-  transform: translateY(-50%);
-  pointer-events: none;
 }

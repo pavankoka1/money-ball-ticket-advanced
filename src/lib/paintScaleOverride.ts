@@ -1,10 +1,8 @@
 /**
  * User-controlled paint / render-scale override.
  * Auto-initialises to the natural value derived from screen DPR.
- * Affects the intermediate chrome paint buffer (non-domMatched path only).
- * NOTE: at SDR (DPR < 2) the hybrid renderer uses domMatched sprites baked
- * at displayScale, so changing paintScale does NOT affect tile canvas memory.
- * It only matters at DPR >= 2 (HiDPI non-SDR path).
+ * Affects the intermediate paint buffer for text sprites (8× → HQ downsample).
+ * Chrome is painted at displayScale for sharp 5px corners. Does NOT change tile memory.
  */
 
 function _naturalPaintScale(dpr: number): number {

@@ -22,9 +22,13 @@ export class CatalogTicket {
     const article = document.createElement("article");
     article.className = styles.catalogTicket;
 
+    const header = document.createElement("header");
+    header.className = styles.catalogTicket__header;
+
     const idEl = document.createElement("span");
     idEl.className = styles.catalogTicket__id;
-    article.appendChild(idEl);
+    header.appendChild(idEl);
+    article.appendChild(header);
 
     const body = document.createElement("div");
     body.className = styles.catalogTicket__body;
@@ -33,6 +37,13 @@ export class CatalogTicket {
       const cell = document.createElement("span");
       cell.className = styles.catalogTicket__cell;
       body.appendChild(cell);
+
+      if (i < TICKET_CELL_COUNT - 1) {
+        const separator = document.createElement("span");
+        separator.className = styles.catalogTicket__separator;
+        separator.setAttribute("aria-hidden", "true");
+        body.appendChild(separator);
+      }
     }
     article.appendChild(body);
 

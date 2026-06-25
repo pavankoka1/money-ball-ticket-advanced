@@ -17,6 +17,7 @@ export const HybridSdrGrid = forwardRef<HybridSdrHandle>(function HybridSdrGrid(
     animCanvasRef,
     contentHeight,
     ticketCount,
+    layoutWidth,
     domOverlayRef,
   } = useHybridSdrGrid({ handleRef: ref });
 
@@ -32,7 +33,10 @@ export const HybridSdrGrid = forwardRef<HybridSdrHandle>(function HybridSdrGrid(
         {hasTickets ? (
           <div
             className="hybrid-sdr__content"
-            style={{ height: `${contentHeight}px` }}
+            style={{
+              height: `${contentHeight}px`,
+              ...(layoutWidth > 0 ? { width: `${layoutWidth}px` } : null),
+            }}
           >
             {Array.from({ length: tileCount }, (_, tileIndex) => (
               <canvas

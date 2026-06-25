@@ -1,3 +1,6 @@
+import { snapToDevicePixel } from "@/lib/canvasSetup";
+import { TICKET_DESIGN_WIDTH } from "@/lib/ticketDesign";
+import { getSdrDisplayScale } from "@/lib/sdrDisplayScale";
 import type { Ticket } from "@/types/ticket";
 import {
   GRID_PADDING,
@@ -7,7 +10,6 @@ import {
   TICKET_HEIGHT,
   getContentHeight,
 } from "@/types/ticket";
-import { TICKET_DESIGN_WIDTH } from "@/lib/ticketDesign";
 
 export type LayoutConfig = {
   cssWidth: number;
@@ -24,7 +26,10 @@ export function resolveCenteredGridPadding(
   cssWidth: number,
   cardWidth = TICKET_DESIGN_WIDTH,
 ): number {
-  return Math.max(0, (cssWidth - getFixedTicketRowWidth(cardWidth)) / 2);
+  const raw = Math.max(0, (cssWidth - getFixedTicketRowWidth(cardWidth)) / 2);
+  const scale =
+    typeof window !== "undefined" ? getSdrDisplayScale() : 1;
+  return snapToDevicePixel(raw, scale);
 }
 
 /** Hybrid grid: fixed 197×43 tickets, centred with equal side padding. */
@@ -179,7 +184,9 @@ export function getDrawableWidth(container: HTMLElement) {
   const style = getComputedStyle(container);
   const padL = parseFloat(style.paddingLeft) || 0;
   const padR = parseFloat(style.paddingRight) || 0;
-  return Math.max(0, container.clientWidth - padL - padR);
+  // Floor to whole CSS px so canvas backing store, layout grid, and DOM overlay
+  // share one integer width (avoids subpixel canvas scale vs 197px tickets).
+  return Math.max(0, Math.floor(container.clientWidth - padL - padR));
 }
 
 export function computeReorderTransitions(

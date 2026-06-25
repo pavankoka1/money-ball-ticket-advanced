@@ -1,7 +1,7 @@
+import type { TicketCanvasQualityMode } from "@/lib/canvasSetup";
 import {
   resolveTicketCanvasDpr,
   resolveTicketCanvasPaintScale,
-  type TicketCanvasQualityMode,
 } from "@/lib/canvasSetup";
 import {
   blitTicketSpriteToViewport,
@@ -18,6 +18,7 @@ import {
   ensureTicketDisplayFontAtlases,
   getTicketDisplayFontAtlases,
 } from "@/lib/ticketDisplayAtlases";
+import { paintTicketTextFrame } from "@/lib/paintTicketFrame";
 import {
   getTicketRenderKey,
   ticketBodyValues,
@@ -26,6 +27,7 @@ import {
   resolveTicketBodyFontSpec,
   resolveTicketIdFontSpec,
 } from "@/lib/ticketFonts";
+import { logTicketDomCanvasParityIfNeeded } from "@/lib/ticketDomParity";
 import { TICKET_HEIGHT, type Ticket } from "@/types/ticket";
 
 const HYBRID_CANVAS_QUALITY: TicketCanvasQualityMode = "enhanced";
@@ -84,25 +86,14 @@ function paintHybridTextBuffer(
   displayCanvas: HTMLCanvasElement,
   layers: TicketFrameLayers,
 ): number | null {
-  const dpr = resolveTicketCanvasDpr();
-  const paintScale = resolveTicketCanvasPaintScale(dpr, HYBRID_CANVAS_QUALITY);
-  const { bufferW, bufferH, displayScale } = syncTicketDisplayCanvas(
+  const result = paintTicketTextFrame(
     displayCanvas,
     TICKET_DESIGN_WIDTH,
     TICKET_DESIGN_HEIGHT,
-    dpr,
-    HYBRID_CANVAS_QUALITY,
-    paintScale,
+    layers,
+    { mode: HYBRID_CANVAS_QUALITY, domMatched: true },
   );
-
-  const displayCtx = getCached2dContext(displayCanvas);
-  if (!displayCtx) return null;
-
-  displayCtx.setTransform(1, 0, 0, 1, 0, 0);
-  displayCtx.clearRect(0, 0, bufferW, bufferH);
-  displayCtx.setTransform(displayScale, 0, 0, displayScale, 0, 0);
-  layers.paintText(displayCtx as CanvasRenderingContext2D, displayScale);
-  return displayScale;
+  return result?.displayScale ?? null;
 }
 
 function evictOldestHybridTextSprite(): void {
@@ -159,6 +150,20 @@ export function ensureSharedChromeReady(): HTMLCanvasElement | null {
   return ensureSharedChromeSprite();
 }
 
+function invalidateSharedChromeSprite(): void {
+  sharedChromeSprite = null;
+  sharedChromeRenderKey = "";
+}
+
+function spriteMatchesDisplayScale(
+  sprite: HTMLCanvasElement,
+  displayScale: number,
+): boolean {
+  const expectedW = Math.max(1, Math.round(TICKET_DESIGN_WIDTH * displayScale));
+  const expectedH = Math.max(1, Math.round(TICKET_DESIGN_HEIGHT * displayScale));
+  return sprite.width === expectedW && sprite.height === expectedH;
+}
+
 /** Blit pre-baked shared chrome (background + dividers) at slot position. */
 export function blitSharedChromeAt(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -166,12 +171,14 @@ export function blitSharedChromeAt(
   y: number,
   displayScale: number,
 ): void {
-  const chrome = ensureSharedChromeSprite();
+  let chrome = ensureSharedChromeSprite();
   if (!chrome) return;
 
-  const expectedW = Math.max(1, Math.round(TICKET_DESIGN_WIDTH * displayScale));
-  const expectedH = Math.max(1, Math.round(TICKET_DESIGN_HEIGHT * displayScale));
-  if (chrome.width !== expectedW || chrome.height !== expectedH) return;
+  if (!spriteMatchesDisplayScale(chrome, displayScale)) {
+    invalidateSharedChromeSprite();
+    chrome = ensureSharedChromeSprite();
+    if (!chrome || !spriteMatchesDisplayScale(chrome, displayScale)) return;
+  }
 
   blitTicketSpriteToViewport(
     ctx,
@@ -192,12 +199,16 @@ export function blitTicketTextAt(
   y: number,
   displayScale: number,
 ): void {
-  const text = ensureHybridTextSprite(ticket);
+  let text = ensureHybridTextSprite(ticket);
   if (!text) return;
 
-  const expectedW = Math.max(1, Math.round(TICKET_DESIGN_WIDTH * displayScale));
-  const expectedH = Math.max(1, Math.round(TICKET_DESIGN_HEIGHT * displayScale));
-  if (text.width !== expectedW || text.height !== expectedH) return;
+  if (!spriteMatchesDisplayScale(text, displayScale)) {
+    hybridTextSpriteCache.delete(
+      `${getTicketRenderKey()}|${getHybridTextFingerprint(ticket)}`,
+    );
+    text = ensureHybridTextSprite(ticket);
+    if (!text || !spriteMatchesDisplayScale(text, displayScale)) return;
+  }
 
   blitTicketSpriteToViewport(
     ctx,
@@ -218,21 +229,14 @@ export function paintHybridTicketOnViewport(
   y: number,
   displayScale: number,
 ): void {
-  const chrome = ensureSharedChromeSprite();
-  const text = ensureHybridTextSprite(ticket);
-  if (!chrome || !text) return;
-
-  const expectedW = Math.max(1, Math.round(TICKET_DESIGN_WIDTH * displayScale));
-  const expectedH = Math.max(1, Math.round(TICKET_DESIGN_HEIGHT * displayScale));
-  if (chrome.width !== expectedW || chrome.height !== expectedH) return;
-  if (text.width !== expectedW || text.height !== expectedH) return;
-
   blitSharedChromeAt(ctx, x, y, displayScale);
   blitTicketTextAt(ctx, ticket, x, y, displayScale);
 }
 
 export function ensureHybridTicketRenderReady(): Promise<void> {
-  return ensureTicketDisplayFontAtlases().then(() => undefined);
+  return ensureTicketDisplayFontAtlases().then(() => {
+    logTicketDomCanvasParityIfNeeded();
+  });
 }
 
 /** Bake text sprites ahead of paint so compositing stays cheap (drawImage only). */

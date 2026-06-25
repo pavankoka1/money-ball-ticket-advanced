@@ -38,7 +38,8 @@ import {
   type ActiveAnimation,
   type ReorderEasing,
 } from "../canvas/animation";
-import { computeSdrTileCount } from "@/lib/sdrCanvasTiles";
+import { computeSdrTileCount, computeVisibleTileRange, type SdrTileWindow } from "@/lib/sdrCanvasTiles";
+import { getResidentTileBudget } from "@/lib/deviceMemoryBudget";
 import { getSdrCompositorScale } from "@/lib/sdrDisplayScale";
 import { paintAnimationCanvasSdr } from "../canvas/paintAnimationCanvasSdr";
 import { paintTiledTallCanvasSdrChunked } from "../canvas/paintTallCanvasSdr";
@@ -100,6 +101,7 @@ export type UseHybridSdrGridResult = {
   animCanvasRef: RefObject<HTMLCanvasElement | null>;
   contentHeight: number;
   ticketCount: number;
+  layoutWidth: number;
   domOverlayRef: RefObject<HTMLDivElement | null>;
 };
 
@@ -121,6 +123,8 @@ export function useHybridSdrGrid({
   const scrollRef = useRef<HTMLDivElement>(null);
   const domOverlayRef = useRef<HTMLDivElement>(null);
   const tileCanvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
+  // Non-null only when virtualization is active (memory-constrained device).
+  const tileWindowRef = useRef<SdrTileWindow | null>(null);
   const animCanvasRef = useRef<HTMLCanvasElement>(null);
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
@@ -129,6 +133,7 @@ export function useHybridSdrGrid({
   const layoutRef = useRef<TicketSlot[]>([]);
   const scrollTopRef = useRef(0);
   const cssWidthRef = useRef(0);
+  const [layoutWidth, setLayoutWidth] = useState(0);
   const animationRef = useRef<ActiveAnimation | null>(null);
   const animationRafRef = useRef<number | null>(null);
   const scrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -140,6 +145,8 @@ export function useHybridSdrGrid({
   const storeSyncCoalesceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const coalescedPaintRunningRef = useRef(false);
   const coalescedPaintPendingRef = useRef(false);
+  const reconcileRunningRef = useRef(false);
+  const reconcilePendingRef = useRef(false);
   const domOverlayActiveRef = useRef(false);
   const domPoolMountCompleteRef = useRef(false);
   const domPoolMountPromiseRef = useRef<Promise<void> | null>(null);
@@ -374,6 +381,7 @@ export function useHybridSdrGrid({
     }
     const anim = animCanvasRef.current;
     if (anim) clearCanvasElement(anim);
+    tileWindowRef.current = null;
   }, [clearCanvasElement]);
 
   const resetDomPoolCompletely = useCallback(() => {
@@ -414,6 +422,8 @@ export function useHybridSdrGrid({
     }
     coalescedPaintPendingRef.current = false;
     coalescedPaintRunningRef.current = false;
+    reconcilePendingRef.current = false;
+    reconcileRunningRef.current = false;
     layoutRef.current = [];
     isScrollingRef.current = false;
     scrollTopRef.current = 0;
@@ -452,8 +462,26 @@ export function useHybridSdrGrid({
 
     const ticketCount = list.length;
     const total = layout.length;
-    const expectedTiles = computeSdrTileCount(ticketCount, getSdrCompositorScale());
+    const compositorScale = getSdrCompositorScale();
+    const expectedTiles = computeSdrTileCount(ticketCount, compositorScale);
     const tileCanvases = await waitForTileCanvases(expectedTiles);
+
+    // Device-adaptive virtualization. When the resident-tile budget covers the
+    // whole grid (desktop), activeTileRange is undefined → every tile stays
+    // resident and scrolling stays zero-paint. On constrained devices only the
+    // viewport window is sized; the rest are released by the paint pass.
+    const residentBudget = getResidentTileBudget();
+    const virtualize = residentBudget < expectedTiles;
+    const activeTileRange = virtualize
+      ? computeVisibleTileRange(
+          scrollTopRef.current,
+          VIEWPORT_HEIGHT,
+          ticketCount,
+          compositorScale,
+          residentBudget,
+        )
+      : undefined;
+    tileWindowRef.current = activeTileRange ?? null;
 
     onPaintProgress?.(0, total);
     onStatusText?.("Compositing hybrid tiles…");
@@ -471,6 +499,7 @@ export function useHybridSdrGrid({
       signal: controller.signal,
       rowRange: options.rowRange,
       fullClear: options.fullClear ?? isFullGrid,
+      activeTileRange,
       onProgress: isFullGrid
         ? undefined
         : (painted, t) => {
@@ -490,6 +519,7 @@ export function useHybridSdrGrid({
         chunkSize: total,
         signal: controller.signal,
         fullClear: true,
+        activeTileRange,
         onProgress: (painted, t) => {
           if (generation !== tallPaintGenRef.current) return;
           onPaintProgress?.(painted, t);
@@ -498,8 +528,11 @@ export function useHybridSdrGrid({
     }
 
     if (ok && generation === tallPaintGenRef.current) {
+      const residentLabel = activeTileRange
+        ? `${activeTileRange.end - activeTileRange.start}/${expectedTiles}`
+        : `${expectedTiles}`;
       onStatusText?.(
-        `SDR ${getSdrCompositorScale()}× · ${tileCanvases.length} tile(s) · ${total} tickets`,
+        `SDR ${compositorScale}× · ${residentLabel} tile(s) · ${total} tickets`,
       );
     }
 
@@ -507,6 +540,86 @@ export function useHybridSdrGrid({
   },
     [clearAllTileCanvases, onPaintProgress, onStatusText, waitForTileCanvases],
   );
+
+  /**
+   * Incremental tile virtualization for scroll (constrained devices only — when
+   * tileWindowRef is null we never run, so desktop keeps zero paint on scroll).
+   * Releases tiles that left the window and paints ONLY the tiles that newly
+   * entered, chunked + serialized (run-to-completion + pending re-run, no
+   * mid-tile abort) so a fast scroll can't leave a half-painted tile.
+   */
+  const reconcileTileWindow = useCallback(async () => {
+    if (!tileWindowRef.current) return; // virtualization inactive (desktop)
+    if (animationRef.current || coalescedPaintRunningRef.current) return;
+    if (!fontsReadyRef.current || !scrollRef.current) return;
+
+    if (reconcileRunningRef.current) {
+      reconcilePendingRef.current = true;
+      return;
+    }
+
+    reconcileRunningRef.current = true;
+    try {
+      do {
+        reconcilePendingRef.current = false;
+
+        const list = ticketsRef.current;
+        const layout = layoutRef.current;
+        const cssWidth = cssWidthRef.current;
+        if (list.length === 0 || layout.length === 0 || cssWidth <= 0) break;
+
+        const compositorScale = getSdrCompositorScale();
+        const next = computeVisibleTileRange(
+          scrollTopRef.current,
+          VIEWPORT_HEIGHT,
+          list.length,
+          compositorScale,
+          getResidentTileBudget(),
+        );
+        const prev = tileWindowRef.current;
+        if (prev && prev.start === next.start && prev.end === next.end) break;
+
+        const tiles = tileCanvasRefs.current;
+
+        // Release tiles that left the window (cheap — no paint).
+        for (let i = 0; i < tiles.length; i++) {
+          const inPrev = prev ? i >= prev.start && i < prev.end : false;
+          const inNext = i >= next.start && i < next.end;
+          if (inPrev && !inNext) {
+            const c = tiles[i];
+            if (c) clearCanvasElement(c);
+          }
+        }
+
+        // Paint only the tiles that newly entered the window.
+        const entered = new Set<number>();
+        for (let i = next.start; i < next.end; i++) {
+          const inPrev = prev ? i >= prev.start && i < prev.end : false;
+          if (!inPrev) entered.add(i);
+        }
+
+        tileWindowRef.current = next;
+        if (entered.size === 0) break;
+
+        const tileCanvases = tiles.filter(
+          (c): c is HTMLCanvasElement => c !== null,
+        );
+
+        await paintTiledTallCanvasSdrChunked({
+          tileCanvases,
+          cssWidth,
+          ticketCount: list.length,
+          layout,
+          tickets: list,
+          chunkSize: 48,
+          fullClear: true,
+          paintTileIndices: entered,
+        });
+      } while (reconcilePendingRef.current);
+    } finally {
+      reconcileRunningRef.current = false;
+    }
+  }, [clearCanvasElement]);
 
   const rebindDomPool = useCallback(
     async (options?: { allowWhileScrolling?: boolean }) => {
@@ -875,21 +988,33 @@ export function useHybridSdrGrid({
     };
   }, [handleStoreReset, scheduleStoreSync, syncTicketsFromStore]);
 
-  const latest = useRef({ rebindDomPool, hideDomOverlay, onScrollMetrics });
+  const latest = useRef({ rebindDomPool, hideDomOverlay, onScrollMetrics, reconcileTileWindow });
   useLayoutEffect(() => {
-    latest.current = { rebindDomPool, hideDomOverlay, onScrollMetrics };
+    latest.current = { rebindDomPool, hideDomOverlay, onScrollMetrics, reconcileTileWindow };
   });
+
+  useLayoutEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const width = getDrawableWidth(container);
+    if (width > 0) {
+      cssWidthRef.current = width;
+      setLayoutWidth(width);
+    }
+  }, []);
 
   useEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
 
     cssWidthRef.current = getDrawableWidth(container);
+    setLayoutWidth(cssWidthRef.current);
 
     const observer = new ResizeObserver(() => {
       const nextWidth = getDrawableWidth(container);
       if (Math.abs(nextWidth - cssWidthRef.current) < 0.5) return;
       cssWidthRef.current = nextWidth;
+      setLayoutWidth(nextWidth);
       if (ticketsRef.current.length === 0) return;
       void resetSdrSpriteCache().then(() => {
         layoutRef.current = buildLayout(
@@ -918,6 +1043,10 @@ export function useHybridSdrGrid({
 
     const onScroll = () => {
       scrollTopRef.current = container.scrollTop;
+
+      // Constrained devices only: shift the resident tile window as we scroll.
+      // No-ops on desktop (reconcile returns immediately when window is null).
+      void latest.current.reconcileTileWindow();
 
       if (addOverlayTimerRef.current) {
         clearTimeout(addOverlayTimerRef.current);
@@ -979,6 +1108,7 @@ export function useHybridSdrGrid({
     animCanvasRef,
     contentHeight,
     ticketCount,
+    layoutWidth,
     domOverlayRef,
   };
 }

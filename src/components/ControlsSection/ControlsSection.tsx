@@ -6,6 +6,10 @@ import { shuffleTickets } from "@/lib/shuffleTickets";
 import { getNativeDpr, setDprOverride } from "@/lib/dprOverride";
 import { setDisplayScaleOverride } from "@/lib/displayScaleOverride";
 import { setPaintScaleOverride } from "@/lib/paintScaleOverride";
+import {
+  isConstrainedDevice,
+  setResidentTileOverride,
+} from "@/lib/deviceMemoryBudget";
 import { MAX_TICKETS } from "@/types/ticket";
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { TicketStore } from "../bingo-catalog";
@@ -42,6 +46,17 @@ const DEFAULT_DPR   = NATIVE_DPR;
 // DPR options are fixed — only values ≤ screen native.
 const DPR_OPTIONS = [2.0, 1.5, 1.0, 0.75].filter((v) => v <= NATIVE_DPR);
 
+// Resident-tile cap for device-adaptive virtualization. "auto" follows the
+// memory-budget detection; numbers force a cap (simulate mobile on desktop);
+// "all" keeps every tile resident (zero paint on scroll). Infinity = all.
+const RESIDENT_TILE_OPTIONS: Array<{ value: "auto" | number; label: string }> = [
+  { value: "auto", label: "auto" },
+  { value: Number.POSITIVE_INFINITY, label: "all (desktop)" },
+  { value: 5, label: "5" },
+  { value: 3, label: "3 (mobile)" },
+  { value: 2, label: "2" },
+];
+
 const DEMO_BALLS = [2, 7, 15] as const;
 
 type BenchView = "dom" | "hybrid-sdr";
@@ -58,6 +73,7 @@ export default function ControlsSection({ view, hybridRef }: ControlsSectionProp
   const [dpr, setDpr]               = useState<number>(DEFAULT_DPR);
   const [displayScale, setDisplayScale] = useState<number>(() => naturalDisplayScale(DEFAULT_DPR));
   const [paintScale, setPaintScale]   = useState<number>(() => naturalPaintScale(DEFAULT_DPR));
+  const [residentCap, setResidentCap] = useState<"auto" | number>("auto");
 
   const isHybrid = view === "hybrid-sdr";
 
@@ -147,6 +163,19 @@ export default function ControlsSection({ view, hybridRef }: ControlsSectionProp
       if (view === "hybrid-sdr") {
         resetHybridTicketRenderCaches();
         await resetSdrSpriteCache();
+        await hybridRef.current?.repaint();
+      }
+    },
+    [hybridRef, view],
+  );
+
+  const handleResidentCapChange = useCallback(
+    async (next: "auto" | number) => {
+      setResidentCap(next);
+      setResidentTileOverride(next);
+      console.log(`[residentTiles] override set to ${next === Number.POSITIVE_INFINITY ? "all" : next}`);
+
+      if (view === "hybrid-sdr") {
         await hybridRef.current?.repaint();
       }
     },
@@ -275,13 +304,61 @@ export default function ControlsSection({ view, hybridRef }: ControlsSectionProp
               </select>
               <span className="controls__dpr-hint">
                 {isSdr
-                  ? "SDR: affects chrome sprite quality only — does NOT change tile memory"
+                  ? "SDR: text sprite quality (8× downsample) — chrome stays at displayScale for sharp corners"
                   : "HiDPI: controls sprite buffer size (same as displayScale at this DPR)"}
               </span>
             </div>
           </div>
         );
       })()}
+
+      {isHybrid && (
+        <div className="controls__group">
+          <span className="controls__label">Resident tiles (device-adaptive)</span>
+          <div className="controls__dpr-row">
+            <select
+              className="controls__dpr-select"
+              value={
+                residentCap === "auto"
+                  ? "auto"
+                  : residentCap === Number.POSITIVE_INFINITY
+                    ? "all"
+                    : String(residentCap)
+              }
+              onChange={(e) => {
+                const v = e.target.value;
+                const next: "auto" | number =
+                  v === "auto"
+                    ? "auto"
+                    : v === "all"
+                      ? Number.POSITIVE_INFINITY
+                      : Number(v);
+                void handleResidentCapChange(next);
+              }}
+            >
+              {RESIDENT_TILE_OPTIONS.map((opt) => (
+                <option
+                  key={opt.label}
+                  value={
+                    opt.value === "auto"
+                      ? "auto"
+                      : opt.value === Number.POSITIVE_INFINITY
+                        ? "all"
+                        : String(opt.value)
+                  }
+                >
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <span className="controls__dpr-hint">
+              {residentCap === "auto"
+                ? `auto → ${isConstrainedDevice() ? "constrained: virtualize (3 tiles)" : "desktop: all resident, zero scroll paint"}`
+                : "forced cap — lower = less memory, paints tiles on scroll"}
+            </span>
+          </div>
+        </div>
+      )}
 
       {isHybrid && (
         <div className="controls__group">

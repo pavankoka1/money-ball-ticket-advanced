@@ -16,6 +16,7 @@
 .hybrid-sdr__content {
   position: relative;
   contain: layout paint;
+  /* Width set inline from measured drawable width — must match canvas + layout. */
 }
 
 .hybrid-sdr__tall-canvas {
@@ -24,7 +25,9 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
+  box-sizing: border-box;
+  max-width: none;
+  /* Explicit pixel width/height from syncTileCanvas — never width:100%. */
 }
 
 .hybrid-sdr__anim-canvas {
@@ -33,7 +36,8 @@
   position: sticky;
   top: 0;
   left: 0;
-  width: 100%;
+  box-sizing: border-box;
+  max-width: none;
   opacity: 0;
   z-index: 2;
 }

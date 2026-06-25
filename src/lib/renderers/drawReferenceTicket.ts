@@ -14,7 +14,7 @@ import {
   measureTextWidth,
   type FontAtlas,
 } from "@/lib/renderers/fontAtlas";
-import { traceRoundedRect, traceVerticalCapsule } from "@/lib/roundedRectPath";
+import { traceRoundedRect, traceRoundedTopRect, traceRoundedBottomRect, traceVerticalCapsule } from "@/lib/roundedRectPath";
 import {
   REFERENCE_TICKET,
   TICKET_COLORS,
@@ -98,25 +98,23 @@ export function drawReferenceTicketBackground(
   const numbersBandTop = ticketNumbersBandTop(height);
   const numbersBandHeight = TICKET_NUMBERS_BAND_HEIGHT;
 
-  // Matches DomTicketCard: cream header + gradient body band (no extra white layer).
-  ctx.save();
-  traceRoundedRect(ctx, 0, 0, width, height, TICKET_RADIUS);
-  ctx.clip();
-
+  // Path fills (no outer clip) — matches DOM border-radius: 5px; overflow: hidden.
+  // Clip anti-aliases inward and both erodes the right edge and softens corners.
   ctx.fillStyle = TICKET_COLORS.white;
-  ctx.fillRect(0, 0, width, height);
+  traceRoundedRect(ctx, 0, 0, width, height, TICKET_RADIUS);
+  ctx.fill();
 
   ctx.fillStyle = TICKET_COLORS.cream;
-  ctx.fillRect(0, 0, width, TICKET_HEADER_HEIGHT);
+  traceRoundedTopRect(ctx, 0, 0, width, TICKET_HEADER_HEIGHT, TICKET_RADIUS);
+  ctx.fill();
 
   ctx.fillStyle = createTicketNumbersBandGradient(
     ctx,
     numbersBandTop,
     numbersBandHeight
   );
-  ctx.fillRect(0, numbersBandTop, width, numbersBandHeight);
-
-  ctx.restore();
+  traceRoundedBottomRect(ctx, 0, numbersBandTop, width, numbersBandHeight, TICKET_RADIUS);
+  ctx.fill();
 }
 
 export function drawReferenceTicketDividersCanvas2D(
