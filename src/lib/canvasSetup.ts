@@ -17,17 +17,11 @@ export const TICKET_SDR_DISPLAY_SCALE = 2;
 
 /** SDR display scale — grows with browser zoom up to the chrome paint cap. */
 export const resolveTicketSdrDisplayScale = (
-  dpr = resolveTicketCanvasDpr(),
+  _dpr = resolveTicketCanvasDpr(),
 ): number => {
-  const override = getDisplayScaleOverride();
-  if (override !== null) return override;
-  if (!isTicketSdrCanvas(dpr)) return 0;
-  const zoomAware = Math.ceil(dpr * TICKET_SDR_DISPLAY_SCALE);
-  const paintCap = resolveTicketChromeRenderScale(dpr);
-  return Math.max(
-    TICKET_SDR_DISPLAY_SCALE,
-    Math.min(zoomAware, paintCap),
-  );
+  // Always explicit — override initialises to the natural value at screen DPR
+  // and is reset whenever DPR changes via the dropdown.
+  return getDisplayScaleOverride();
 };
 
 export type TicketCanvasQualityMode = "legacy" | "enhanced";
@@ -55,14 +49,11 @@ export const resolveTicketChromeRenderScale = (
 };
 
 export const resolveTicketCanvasPaintScale = (
-  dpr = resolveTicketCanvasDpr(),
-  mode: TicketCanvasQualityMode = "enhanced"
+  _dpr = resolveTicketCanvasDpr(),
+  _mode: TicketCanvasQualityMode = "enhanced"
 ): number => {
-  const override = getPaintScaleOverride();
-  if (override !== null) return override;
-  return mode === "enhanced"
-    ? resolveTicketChromeRenderScale(dpr)
-    : resolveTicketCanvasRenderScale(dpr);
+  // Always explicit — same lifecycle as displayScaleOverride.
+  return getPaintScaleOverride();
 };
 
 /** Linux/Windows @ 1× DPR — huge backing store downscaled by the browser blurs chrome. */

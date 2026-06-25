@@ -3,7 +3,7 @@ import { resetSdrSpriteCache } from "@/components/hybrid-sdr/canvas/sdrSprite";
 import { resetHybridTicketRenderCaches } from "@/components/hybrid-sdr/canvas/hybridTicketRenderer";
 import { claimTicketsFromPool, resetTicketPool } from "@/lib/ticketPool";
 import { shuffleTickets } from "@/lib/shuffleTickets";
-import { setDprOverride } from "@/lib/dprOverride";
+import { getNativeDpr, setDprOverride } from "@/lib/dprOverride";
 import { setDisplayScaleOverride } from "@/lib/displayScaleOverride";
 import { setPaintScaleOverride } from "@/lib/paintScaleOverride";
 import { MAX_TICKETS } from "@/types/ticket";
@@ -12,15 +12,35 @@ import { TicketStore } from "../bingo-catalog";
 import type { HybridSdrHandle } from "../hybrid-sdr";
 import "./ControlsSection.css";
 
-// Options are sorted highest→lowest (default is always the first entry).
-// Dropdowns are intentionally one-directional: reduce quality only.
-const DPR_OPTIONS            = [1.0, 0.75] as const;
-const DISPLAY_SCALE_OPTIONS  = [2, 1]      as const;   // natural at DPR=1
-const PAINT_SCALE_OPTIONS    = [8, 6, 4, 2] as const;  // natural at DPR=1
+// ---------------------------------------------------------------------------
+// All defaults are derived from the actual screen DPR at module load time.
+// Options are sorted highest→lowest — the dropdown only reduces quality.
+// When DPR changes, the scale dropdowns reset to the natural values for the
+// new DPR so all three controls stay coherent.
+// ---------------------------------------------------------------------------
 
-const DEFAULT_DPR           = 1.0;
-const DEFAULT_DISPLAY_SCALE = 2;
-const DEFAULT_PAINT_SCALE   = 8;
+/** Mirrors resolveTicketChromeRenderScale (MIN_SDR_CHROME_SCALE = 8). */
+function naturalPaintScale(dpr: number): number {
+  if (dpr >= 2) return dpr * 4;
+  return Math.max(dpr * 2, 8);
+}
+
+/**
+ * Mirrors getSdrDisplayScale:
+ *   DPR >= 2 (HiDPI): displayScale = paintScale
+ *   DPR <  2 (SDR):   MAX(2, MIN(CEIL(dpr×2), paintCap))
+ */
+function naturalDisplayScale(dpr: number): number {
+  if (dpr >= 2) return naturalPaintScale(dpr);
+  const cap = naturalPaintScale(dpr);
+  return Math.max(2, Math.min(Math.ceil(dpr * 2), cap));
+}
+
+const NATIVE_DPR    = getNativeDpr();
+const DEFAULT_DPR   = NATIVE_DPR;
+
+// DPR options are fixed — only values ≤ screen native.
+const DPR_OPTIONS = [2.0, 1.5, 1.0, 0.75].filter((v) => v <= NATIVE_DPR);
 
 const DEMO_BALLS = [2, 7, 15] as const;
 
@@ -35,9 +55,9 @@ export default function ControlsSection({ view, hybridRef }: ControlsSectionProp
   const nextIdRef = useRef(1);
   const ticketCountRef = useRef(0);
   const statusRef = useRef<HTMLSpanElement>(null);
-  const [dpr, setDpr] = useState<number>(DEFAULT_DPR);
-  const [displayScale, setDisplayScale] = useState<number>(DEFAULT_DISPLAY_SCALE);
-  const [paintScale, setPaintScale] = useState<number>(DEFAULT_PAINT_SCALE);
+  const [dpr, setDpr]               = useState<number>(DEFAULT_DPR);
+  const [displayScale, setDisplayScale] = useState<number>(() => naturalDisplayScale(DEFAULT_DPR));
+  const [paintScale, setPaintScale]   = useState<number>(() => naturalPaintScale(DEFAULT_DPR));
 
   const isHybrid = view === "hybrid-sdr";
 
@@ -56,11 +76,8 @@ export default function ControlsSection({ view, hybridRef }: ControlsSectionProp
     });
   }, [paintStatus]);
 
-  // Sync module-level overrides with the default dropdown values on first mount.
-  useEffect(() => {
-    setDisplayScaleOverride(DEFAULT_DISPLAY_SCALE);
-    setPaintScaleOverride(DEFAULT_PAINT_SCALE);
-  }, []);
+  // No mount effect needed — both overrides self-initialise in their modules
+  // to naturalDisplayScale/naturalPaintScale(window.devicePixelRatio).
 
   const handleAdd = useCallback((count: number) => {
     const current = TicketStore.getTicketCount();
@@ -83,9 +100,19 @@ export default function ControlsSection({ view, hybridRef }: ControlsSectionProp
 
   const handleDprChange = useCallback(
     async (nextDpr: number) => {
+      const nextDS = naturalDisplayScale(nextDpr);
+      const nextPS = naturalPaintScale(nextDpr);
+
       setDpr(nextDpr);
       setDprOverride(nextDpr);
-      console.log(`[DPR] override set to ${nextDpr}`);
+
+      // Reset scale dropdowns to the natural values for the new DPR.
+      setDisplayScale(nextDS);
+      setDisplayScaleOverride(nextDS);
+      setPaintScale(nextPS);
+      setPaintScaleOverride(nextPS);
+
+      console.log(`[DPR] ${nextDpr}  displayScale→${nextDS}  paintScale→${nextPS}`);
 
       if (view === "hybrid-sdr") {
         resetHybridTicketRenderCaches();
@@ -194,56 +221,67 @@ export default function ControlsSection({ view, hybridRef }: ControlsSectionProp
               ))}
             </select>
             <span className="controls__dpr-hint">
-              physical tiles ≈ {(dpr * dpr).toFixed(2)}× area vs 1×
+              physical tiles ≈ {(dpr * dpr / (NATIVE_DPR * NATIVE_DPR)).toFixed(2)}× area vs native {NATIVE_DPR}×
             </span>
           </div>
         </div>
       )}
 
-      {isHybrid && (
-        <div className="controls__group">
-          <span className="controls__label">Display scale (supersampling)</span>
-          <div className="controls__dpr-row">
-            <select
-              className="controls__dpr-select"
-              value={displayScale}
-              onChange={(e) => void handleDisplayScaleChange(Number(e.target.value))}
-            >
-              {DISPLAY_SCALE_OPTIONS.map((opt) => (
-                <option key={opt} value={opt}>
-                  {opt}×{opt === DEFAULT_DISPLAY_SCALE ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
-            <span className="controls__dpr-hint">
-              sprite &amp; tile backing-store pixels per CSS px —
-              tile≈{((displayScale * displayScale * 504 * 408 * 4) / 1_048_576).toFixed(1)}MB ea
-            </span>
+      {isHybrid && (() => {
+        const naturalDS   = naturalDisplayScale(dpr);
+        const dsOptions   = [8, 6, 4, 2, 1].filter((v) => v <= naturalDS);
+        return (
+          <div className="controls__group">
+            <span className="controls__label">Display scale (supersampling)</span>
+            <div className="controls__dpr-row">
+              <select
+                className="controls__dpr-select"
+                value={displayScale}
+                onChange={(e) => void handleDisplayScaleChange(Number(e.target.value))}
+              >
+                {dsOptions.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}×{opt === naturalDS ? " (default)" : ""}
+                  </option>
+                ))}
+              </select>
+              <span className="controls__dpr-hint">
+                tile backing-store per CSS px —
+                tile≈{((displayScale * displayScale * 504 * 408 * 4) / 1_048_576).toFixed(1)}MB ea
+              </span>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
-      {isHybrid && (
-        <div className="controls__group">
-          <span className="controls__label">Paint scale (render quality)</span>
-          <div className="controls__dpr-row">
-            <select
-              className="controls__dpr-select"
-              value={paintScale}
-              onChange={(e) => void handlePaintScaleChange(Number(e.target.value))}
-            >
-              {PAINT_SCALE_OPTIONS.map((opt) => (
-                <option key={opt} value={opt}>
-                  {opt}×{opt === DEFAULT_PAINT_SCALE ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
-            <span className="controls__dpr-hint">
-              intermediate chrome paint buffer (non-domMatched path)
-            </span>
+      {isHybrid && (() => {
+        const naturalPS   = naturalPaintScale(dpr);
+        const psOptions   = [16, 12, 8, 6, 4, 2].filter((v) => v <= naturalPS);
+        const isSdr       = dpr < 2;
+        return (
+          <div className="controls__group">
+            <span className="controls__label">Paint scale (render quality)</span>
+            <div className="controls__dpr-row">
+              <select
+                className="controls__dpr-select"
+                value={paintScale}
+                onChange={(e) => void handlePaintScaleChange(Number(e.target.value))}
+              >
+                {psOptions.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}×{opt === naturalPS ? " (default)" : ""}
+                  </option>
+                ))}
+              </select>
+              <span className="controls__dpr-hint">
+                {isSdr
+                  ? "SDR: affects chrome sprite quality only — does NOT change tile memory"
+                  : "HiDPI: controls sprite buffer size (same as displayScale at this DPR)"}
+              </span>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {isHybrid && (
         <div className="controls__group">
