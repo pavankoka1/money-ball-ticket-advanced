@@ -154,7 +154,7 @@ export function paintTicketTextFrame(
   const displayCtx = getCached2dContext(displayCanvas);
   if (!displayCtx) return null;
 
-  if (mode === "enhanced" && isTicketSdrCanvas(dpr) && paintScale > displayScale) {
+  if (mode === "enhanced" && paintScale > displayScale) {
     const srcW = Math.max(1, Math.round(logicalWidth * paintScale));
     const srcH = Math.max(1, Math.round(logicalHeight * paintScale));
     ensureDownscalePingBuffers(srcW, srcH, bufferW, bufferH);

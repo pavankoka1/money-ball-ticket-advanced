@@ -10,10 +10,7 @@ import {
 } from "@/lib/canvasContext";
 import { createTicketFrameLayers } from "@/lib/ticketFrameLayers";
 import type { TicketFrameLayers } from "@/lib/ticketFrameLayers";
-import {
-  TICKET_DESIGN_HEIGHT,
-  TICKET_DESIGN_WIDTH,
-} from "@/lib/ticketDesign";
+import { TICKET_DESIGN_HEIGHT, TICKET_DESIGN_WIDTH, TICKET_MOBILE_DESIGN_WIDTH, ticketMobileBodyFont, ticketMobileIdFont } from "@/lib/ticketDesign";
 import {
   ensureTicketDisplayFontAtlases,
   getTicketDisplayFontAtlases,
@@ -27,12 +24,13 @@ import {
   resolveTicketBodyFontSpec,
   resolveTicketIdFontSpec,
 } from "@/lib/ticketFonts";
+import { isConstrainedDevice } from "@/lib/deviceMemoryBudget";
+import { isMobileTicketLayout } from "@/lib/ticketGridLayout";
+import { getHybridTextSpriteCacheMax } from "@/lib/deviceMemoryBudget";
 import { logTicketDomCanvasParityIfNeeded } from "@/lib/ticketDomParity";
 import { TICKET_HEIGHT, type Ticket } from "@/types/ticket";
 
 const HYBRID_CANVAS_QUALITY: TicketCanvasQualityMode = "enhanced";
-
-const HYBRID_TEXT_SPRITE_CACHE_MAX = 512;
 
 let sharedChromeSprite: HTMLCanvasElement | null = null;
 let sharedChromeRenderKey = "";
@@ -44,14 +42,29 @@ function getHybridTextFingerprint(ticket: Ticket): string {
   return `${ticket.id}:${ticketBodyValues(ticket).join(",")}`;
 }
 
+function isHybridMobileRenderer(): boolean {
+  return isConstrainedDevice() || isMobileTicketLayout();
+}
+
+function getHybridTicketLogicalSize(): { width: number; height: number } {
+  if (isHybridMobileRenderer()) {
+    return { width: TICKET_MOBILE_DESIGN_WIDTH, height: TICKET_DESIGN_HEIGHT };
+  }
+  return { width: TICKET_DESIGN_WIDTH, height: TICKET_DESIGN_HEIGHT };
+}
+
 function createHybridTicketLayers(ticket: Ticket | null): TicketFrameLayers {
+  const mobile = isHybridMobileRenderer();
+  const { width, height } = getHybridTicketLogicalSize();
   return createTicketFrameLayers(ticket ? ticketBodyValues(ticket) : [], {
     quality: HYBRID_CANVAS_QUALITY,
     domMatchedText: true,
     ticketId: ticket?.id,
+    width,
+    height,
     fonts: {
-      body: resolveTicketBodyFontSpec(),
-      id: resolveTicketIdFontSpec(),
+      body: mobile ? ticketMobileBodyFont() : resolveTicketBodyFontSpec(),
+      id: mobile ? ticketMobileIdFont() : resolveTicketIdFontSpec(),
     },
     displayAtlases: getTicketDisplayFontAtlases() ?? undefined,
   });
@@ -63,10 +76,11 @@ function paintHybridChromeBuffer(
 ): number | null {
   const dpr = resolveTicketCanvasDpr();
   const paintScale = resolveTicketCanvasPaintScale(dpr, HYBRID_CANVAS_QUALITY);
+  const { width, height } = getHybridTicketLogicalSize();
   const { bufferW, bufferH, displayScale } = syncTicketDisplayCanvas(
     displayCanvas,
-    TICKET_DESIGN_WIDTH,
-    TICKET_DESIGN_HEIGHT,
+    width,
+    height,
     dpr,
     HYBRID_CANVAS_QUALITY,
     paintScale,
@@ -86,10 +100,11 @@ function paintHybridTextBuffer(
   displayCanvas: HTMLCanvasElement,
   layers: TicketFrameLayers,
 ): number | null {
+  const { width, height } = getHybridTicketLogicalSize();
   const result = paintTicketTextFrame(
     displayCanvas,
-    TICKET_DESIGN_WIDTH,
-    TICKET_DESIGN_HEIGHT,
+    width,
+    height,
     layers,
     { mode: HYBRID_CANVAS_QUALITY, domMatched: true },
   );
@@ -131,7 +146,7 @@ function ensureHybridTextSprite(ticket: Ticket): HTMLCanvasElement | null {
   const layers = createHybridTicketLayers(ticket);
   if (paintHybridTextBuffer(canvas, layers) === null) return null;
 
-  if (hybridTextSpriteCache.size >= HYBRID_TEXT_SPRITE_CACHE_MAX) {
+  if (hybridTextSpriteCache.size >= getHybridTextSpriteCacheMax()) {
     evictOldestHybridTextSprite();
   }
   hybridTextSpriteCache.set(cacheKey, canvas);
@@ -158,10 +173,22 @@ function invalidateSharedChromeSprite(): void {
 function spriteMatchesDisplayScale(
   sprite: HTMLCanvasElement,
   displayScale: number,
+  logicalW = getHybridTicketLogicalSize().width,
 ): boolean {
-  const expectedW = Math.max(1, Math.round(TICKET_DESIGN_WIDTH * displayScale));
+  const expectedW = Math.max(1, Math.round(logicalW * displayScale));
   const expectedH = Math.max(1, Math.round(TICKET_DESIGN_HEIGHT * displayScale));
   return sprite.width === expectedW && sprite.height === expectedH;
+}
+
+/** Desktop chrome/text sprites stretched onto 181px mobile slots only when baked at 197px. */
+function needsMobileSpriteStretch(
+  sprite: HTMLCanvasElement,
+  displayScale: number,
+  logicalW: number,
+): boolean {
+  if (logicalW !== TICKET_MOBILE_DESIGN_WIDTH) return false;
+  const desktopW = Math.max(1, Math.round(TICKET_DESIGN_WIDTH * displayScale));
+  return sprite.width === desktopW;
 }
 
 /** Blit pre-baked shared chrome (background + dividers) at slot position. */
@@ -170,24 +197,28 @@ export function blitSharedChromeAt(
   x: number,
   y: number,
   displayScale: number,
+  logicalW = TICKET_DESIGN_WIDTH,
+  logicalH = TICKET_HEIGHT,
 ): void {
   let chrome = ensureSharedChromeSprite();
   if (!chrome) return;
 
-  if (!spriteMatchesDisplayScale(chrome, displayScale)) {
+  if (!spriteMatchesDisplayScale(chrome, displayScale, logicalW)) {
     invalidateSharedChromeSprite();
     chrome = ensureSharedChromeSprite();
-    if (!chrome || !spriteMatchesDisplayScale(chrome, displayScale)) return;
+    if (!chrome || !spriteMatchesDisplayScale(chrome, displayScale, logicalW)) return;
   }
 
+  const allowScale = needsMobileSpriteStretch(chrome, displayScale, logicalW);
   blitTicketSpriteToViewport(
     ctx,
     chrome,
     x,
     y,
-    TICKET_DESIGN_WIDTH,
-    TICKET_HEIGHT,
+    logicalW,
+    logicalH,
     displayScale,
+    { allowScale },
   );
 }
 
@@ -198,26 +229,30 @@ export function blitTicketTextAt(
   x: number,
   y: number,
   displayScale: number,
+  logicalW = TICKET_DESIGN_WIDTH,
+  logicalH = TICKET_HEIGHT,
 ): void {
   let text = ensureHybridTextSprite(ticket);
   if (!text) return;
 
-  if (!spriteMatchesDisplayScale(text, displayScale)) {
+  if (!spriteMatchesDisplayScale(text, displayScale, logicalW)) {
     hybridTextSpriteCache.delete(
       `${getTicketRenderKey()}|${getHybridTextFingerprint(ticket)}`,
     );
     text = ensureHybridTextSprite(ticket);
-    if (!text || !spriteMatchesDisplayScale(text, displayScale)) return;
+    if (!text || !spriteMatchesDisplayScale(text, displayScale, logicalW)) return;
   }
 
+  const allowScale = needsMobileSpriteStretch(text, displayScale, logicalW);
   blitTicketSpriteToViewport(
     ctx,
     text,
     x,
     y,
-    TICKET_DESIGN_WIDTH,
-    TICKET_HEIGHT,
+    logicalW,
+    logicalH,
     displayScale,
+    { allowScale },
   );
 }
 
@@ -228,9 +263,11 @@ export function paintHybridTicketOnViewport(
   x: number,
   y: number,
   displayScale: number,
+  logicalW?: number,
 ): void {
-  blitSharedChromeAt(ctx, x, y, displayScale);
-  blitTicketTextAt(ctx, ticket, x, y, displayScale);
+  const w = logicalW ?? getHybridTicketLogicalSize().width;
+  blitSharedChromeAt(ctx, x, y, displayScale, w, TICKET_HEIGHT);
+  blitTicketTextAt(ctx, ticket, x, y, displayScale, w, TICKET_HEIGHT);
 }
 
 export function ensureHybridTicketRenderReady(): Promise<void> {

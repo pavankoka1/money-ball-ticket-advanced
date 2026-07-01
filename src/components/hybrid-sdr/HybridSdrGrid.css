@@ -1,22 +1,36 @@
+.hybrid-sdr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.hybrid-sdr__viewport {
+  position: relative;
+  width: 100%;
+  margin-inline: auto;
+}
+
 .hybrid-sdr__scroll {
   position: relative;
   box-sizing: border-box;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior-y: contain;
-  border-radius: 1.5rem;
-  border: 1px solid #27272a;
-  background: rgb(9 9 11 / 0.8);
-  padding: 0.5rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  background: rgb(0 0 0 / 35%);
+  padding: 0;
   scrollbar-width: thin;
-  scrollbar-color: #3f3f46 #111113;
+  scrollbar-color: rgb(255 255 255 / 35%) transparent;
   scrollbar-gutter: stable;
 }
 
 .hybrid-sdr__content {
   position: relative;
-  contain: layout paint;
-  /* Width set inline from measured drawable width — must match canvas + layout. */
+  /* layout only — paint containment clipped scaled enter animation */
+  contain: layout;
+  margin-inline: auto;
 }
 
 .hybrid-sdr__tall-canvas {
@@ -25,21 +39,23 @@
   position: absolute;
   top: 0;
   left: 0;
+  z-index: 0;
   box-sizing: border-box;
   max-width: none;
-  /* Explicit pixel width/height from syncTileCanvas — never width:100%. */
 }
 
+/* Viewport overlay — outside scroll overflow so overshoot scale is visible */
 .hybrid-sdr__anim-canvas {
   pointer-events: none;
   display: block;
-  position: sticky;
+  position: absolute;
   top: 0;
-  left: 0;
+  left: 50%;
   box-sizing: border-box;
   max-width: none;
   opacity: 0;
-  z-index: 2;
+  z-index: 3;
+  transform: translateX(-50%);
 }
 
 .hybrid-sdr__empty {
@@ -50,7 +66,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #a1a1aa;
+  color: rgb(255 255 255 / 70%);
   font-size: 0.875rem;
   text-align: center;
 }
@@ -58,19 +74,24 @@
 .hybrid-sdr__empty span {
   margin-bottom: 0.75rem;
   font-size: 2.25rem;
-  opacity: 0.4;
-}
-
-.hybrid-sdr__status {
-  margin: 0.5rem 0 0;
-  text-align: right;
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  opacity: 0.5;
 }
 
 .hybrid-sdr__hint {
-  margin: 0.25rem 0 0;
-  text-align: right;
+  margin: 0.35rem 0 0;
+  text-align: center;
   font-size: 0.6875rem;
-  color: #52525b;
+  color: rgb(255 255 255 / 45%);
+}
+
+@media (max-width: 640px) {
+  .hybrid-sdr__viewport {
+    max-width: none;
+  }
+
+  .hybrid-sdr__scroll {
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
 }

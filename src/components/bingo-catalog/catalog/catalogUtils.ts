@@ -1,5 +1,9 @@
 import { CATALOG_CONFIG } from "../lib/catalogConfig";
 import type { CatalogTicket } from "../ticket/CatalogTicket";
+import {
+  buildTicketAddFlowKeyframes,
+  TICKET_ADD_ANIM,
+} from "@/lib/ticketAddAnimation";
 
 export type ContainerAttrs = {
   columns: number;
@@ -109,16 +113,24 @@ export function shuffleAnimationDelayed(
 }
 
 export function fadeInAnimation(element: HTMLElement, delayMs = 0): void {
-  element.animate(
-    [
-      { opacity: 0, transform: "translate3d(-50%, 0, 0) scale(0.5)" },
-      { opacity: 1, transform: "translate3d(0, 0, 0) scale(1)" },
-    ],
-    {
-      duration: CATALOG_CONFIG.ANIMATION.FADE_DURATION_MS,
-      delay: delayMs,
-      easing: "ease-in-out",
-      fill: "both",
+  element.style.transformOrigin = TICKET_ADD_ANIM.TRANSFORM_ORIGIN;
+  element.style.opacity = "0";
+  element.style.transform = `scale(${TICKET_ADD_ANIM.SCALE_OVERSHOOT})`;
+
+  const animation = element.animate(buildTicketAddFlowKeyframes(), {
+    duration: TICKET_ADD_ANIM.DURATION_MS,
+    delay: delayMs,
+    easing: TICKET_ADD_ANIM.EASING,
+    fill: "both",
+  });
+
+  animation.addEventListener(
+    "finish",
+    () => {
+      element.style.opacity = "1";
+      element.style.transformOrigin = "";
+      element.style.transform = "";
     },
+    { once: true },
   );
 }

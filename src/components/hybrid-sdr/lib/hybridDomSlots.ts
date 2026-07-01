@@ -1,5 +1,7 @@
 import type { TicketSlot } from "@/lib/ticketLayout";
-import { ROW_HEIGHT, TICKET_HEIGHT, type Ticket } from "@/types/ticket";
+import { getTicketGridColumns } from "@/lib/ticketGridLayout";
+import { getLayoutRowHeight } from "@/lib/ticketGridLayout";
+import { TICKET_HEIGHT, type Ticket } from "@/types/ticket";
 
 /** Wait this long after the last scroll event before treating scroll as idle. */
 export const HYBRID_SCROLL_IDLE_MS = 300;
@@ -21,25 +23,31 @@ export function isSlotInVisibleWindow(
   viewportHeight: number,
   bufferRows = HYBRID_DOM_ROW_BUFFER,
 ): boolean {
-  const margin = bufferRows * ROW_HEIGHT;
+  const margin = bufferRows * getLayoutRowHeight();
   const windowTop = scrollTop - margin;
   const windowBottom = scrollTop + viewportHeight + margin;
   return slotY + TICKET_HEIGHT > windowTop && slotY < windowBottom;
 }
 
+/**
+ * Visible layout slots for the DOM pool band — O(1) slice; layout is row-major.
+ */
 export function getVisibleDomSlots(
   slots: readonly TicketSlot[],
   scrollTop: number,
   viewportHeight: number,
   bufferRows = HYBRID_DOM_ROW_BUFFER,
 ): TicketSlot[] {
-  const next: TicketSlot[] = [];
-  for (const slot of slots) {
-    if (isSlotInVisibleWindow(slot.y, scrollTop, viewportHeight, bufferRows)) {
-      next.push(slot);
-    }
-  }
-  return next;
+  const { startRow, endRow } = getViewportRowRange(
+    scrollTop,
+    viewportHeight,
+    bufferRows,
+  );
+  const columns = getTicketGridColumns();
+  const startIndex = startRow * columns;
+  const endIndex = Math.min(slots.length, endRow * columns);
+  if (startIndex >= endIndex) return [];
+  return slots.slice(startIndex, endIndex);
 }
 
 export function getVisibleDomSlotIdSet(slots: readonly TicketSlot[]): Set<number> {
@@ -51,12 +59,27 @@ export function getViewportRowRange(
   viewportHeight: number,
   bufferRows = HYBRID_DOM_ROW_BUFFER,
 ): { startRow: number; endRow: number } {
-  const margin = bufferRows * ROW_HEIGHT;
+  const margin = bufferRows * getLayoutRowHeight();
   const top = Math.max(0, scrollTop - margin);
   const bottom = scrollTop + viewportHeight + margin;
-  const startRow = Math.max(0, Math.floor(top / ROW_HEIGHT));
-  const endRow = Math.max(startRow + 1, Math.ceil(bottom / ROW_HEIGHT));
+  const rowH = getLayoutRowHeight();
+  const startRow = Math.max(0, Math.floor(top / rowH));
+  const endRow = Math.max(startRow + 1, Math.ceil(bottom / rowH));
   return { startRow, endRow };
+}
+
+/** Stable key for the DOM pool row band — only changes when the buffered slice shifts. */
+export function getDomScrollBandKey(
+  scrollTop: number,
+  viewportHeight: number,
+  bufferRows = HYBRID_DOM_ROW_BUFFER,
+): number {
+  const { startRow, endRow } = getViewportRowRange(
+    scrollTop,
+    viewportHeight,
+    bufferRows,
+  );
+  return startRow * 65536 + endRow;
 }
 
 export function getTicketsInRowRange(
@@ -68,7 +91,7 @@ export function getTicketsInRowRange(
   const out: Ticket[] = [];
   const seen = new Set<number>();
   for (const slot of layout) {
-    const row = Math.floor(slot.y / ROW_HEIGHT);
+    const row = Math.floor(slot.y / getLayoutRowHeight());
     if (row < startRow || row >= endRow) continue;
     const ticket = tickets[slot.index];
     if (!ticket || seen.has(ticket.id)) continue;

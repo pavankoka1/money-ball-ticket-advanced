@@ -7,6 +7,8 @@ import {
   resolveTicketDisplayBufferSize,
 } from "@/lib/canvasSetup";
 import { blitTicketSpriteToViewport } from "@/lib/canvasContext";
+import { isConstrainedDevice } from "@/lib/deviceMemoryBudget";
+import { isMobileTicketLayout } from "@/lib/ticketGridLayout";
 import { drawTicketCanvas2D } from "@/lib/renderers/drawReferenceTicket";
 import { paintTicketFrame } from "@/lib/paintTicketFrame";
 import { createTicketFrameLayers } from "@/lib/ticketFrameLayers";
@@ -47,7 +49,7 @@ export function getTicketRenderKey(): string {
     paintScale,
     GRID_CANVAS_QUALITY,
   );
-  return `${dpr.toFixed(4)}|${paintScale}|${displayScale}`;
+  return `${dpr.toFixed(4)}|${paintScale}|${displayScale}|${isConstrainedDevice() || isMobileTicketLayout() ? "m181" : "d197"}`;
 }
 
 let ticketSpriteCacheRenderKey = "";

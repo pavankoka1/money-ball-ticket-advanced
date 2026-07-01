@@ -9,4 +9,9 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
+  server: {
+    // Listen on all interfaces so phones on the same Wi‑Fi can open the dev URL.
+    host: true,
+    port: 5173,
+  },
 });

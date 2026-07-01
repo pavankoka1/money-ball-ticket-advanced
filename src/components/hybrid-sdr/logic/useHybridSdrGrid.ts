@@ -1,5 +1,5 @@
 import { TicketStore } from "@/components/bingo-catalog/store/TicketStore";
-import { ensureHybridTicketRenderReady, prefetchHybridTextSprites, scheduleWarmHybridDigitSprites } from "@/components/hybrid-sdr/canvas/hybridTicketRenderer";
+import { ensureHybridTicketRenderReady, prefetchHybridTextSprites, resetHybridTicketRenderCaches, scheduleWarmHybridDigitSprites } from "@/components/hybrid-sdr/canvas/hybridTicketRenderer";
 import { getPoolTicketsForWarm } from "@/lib/ticketPool";
 import { ensureGridTicketFontsReady } from "@/lib/ticketRenderer";
 import { ensureTicketDisplayFontAtlases } from "@/lib/ticketDisplayAtlases";
@@ -7,14 +7,20 @@ import {
   buildHybridLayoutConfig,
   buildLayout,
   computeReorderTransitions,
+  filterViewportReorderTransitions,
   getDrawableWidth,
+  getShuffleDrawIds,
   shuffleTickets,
-  tryPrependLayout,
   type ReorderTransition,
   type TicketSlot,
 } from "@/lib/ticketLayout";
 import {
-  VIEWPORT_HEIGHT,
+  clampCatalogCssWidth,
+  DESKTOP_CATALOG_VIEWPORT_HEIGHT,
+  getCatalogLayoutWidth,
+  getCatalogViewportHeight,
+} from "@/lib/catalogLayout";
+import {
   getContentHeight,
   type Ticket,
 } from "@/types/ticket";
@@ -33,31 +39,60 @@ import {
   type RefObject,
 } from "react";
 import { DomPoolSlot } from "../dom/DomPoolSlot";
+import { runDomViewportShuffleAnimation } from "../dom/domShuffleAnimation";
 import {
   ANIMATION_MS,
+  isAddAnimation,
   type ActiveAnimation,
   type ReorderEasing,
 } from "../canvas/animation";
-import { computeSdrTileCount, computeVisibleTileRange, type SdrTileWindow } from "@/lib/sdrCanvasTiles";
-import { getResidentTileBudget } from "@/lib/deviceMemoryBudget";
-import { getSdrCompositorScale } from "@/lib/sdrDisplayScale";
+import { paintAddAnimationCanvasSdr } from "../canvas/paintAddAnimationCanvasSdr";
+import {
+  computeSdrTileCount,
+  computeVisibleTileRange,
+  getScrollTileBandKey,
+  resolveResidentTileBudgetForGrid,
+  viewportNeedsCanvasTiles,
+  type SdrTileWindow,
+} from "@/lib/sdrCanvasTiles";
+import { isConstrainedDevice } from "@/lib/deviceMemoryBudget";
+import { isCanvasGridMode, isDomGridMode } from "@/lib/gridRendererMode";
+import { syncDisplayScaleForDevice } from "@/lib/displayScaleOverride";
+import { syncPaintScaleForDevice } from "@/lib/paintScaleOverride";
+import { getSdrCompositorScale, setSdrLayoutCssWidth } from "@/lib/sdrDisplayScale";
+import {
+  isMobileTicketLayout,
+  setTicketGridLayout,
+} from "@/lib/ticketGridLayout";
 import { paintAnimationCanvasSdr } from "../canvas/paintAnimationCanvasSdr";
 import { paintTiledTallCanvasSdrChunked } from "../canvas/paintTallCanvasSdr";
 import { resetSdrSpriteCache } from "../canvas/sdrSprite";
 import {
   createInitialDomPoolEntries,
   DOM_POOL_MOUNT_BATCH_SIZE,
+  getActiveDomPoolSlotCount,
   HYBRID_DOM_OVERLAY_POOL_SIZE,
   updateDomPoolEntriesInPlace,
   type DomPoolEntry,
 } from "../lib/domPool";
-import { getVisibleDomSlots, getViewportRowRange, HYBRID_SCROLL_IDLE_MS } from "../lib/hybridDomSlots";
+import {
+  getDomScrollBandKey,
+  getVisibleDomSlots,
+  getViewportRowRange,
+  HYBRID_SCROLL_IDLE_MS,
+} from "../lib/hybridDomSlots";
 import { yieldFrame } from "../lib/yieldFrame";
+import {
+  buildAddAnimationPlan,
+  shouldRunAddAnimation,
+  TICKET_ADD_ANIM,
+} from "@/lib/ticketAddAnimation";
 
 const SCROLL_METRICS_IDLE_MS = 150;
-const TICKET_ADD_OVERLAY_DELAY_MS = 200;
 /** Coalesce rapid bundle clicks into one paint pass. */
 const STORE_SYNC_COALESCE_MS = 72;
+/** Tickets painted per frame on constrained devices during tall-canvas compositing. */
+const CONSTRAINED_PAINT_CHUNK_SIZE = 24;
 
 type PaintTallOptions = {
   rowRange?: { startRow: number; endRow: number };
@@ -102,7 +137,9 @@ export type UseHybridSdrGridResult = {
   contentHeight: number;
   ticketCount: number;
   layoutWidth: number;
+  viewportHeight: number;
   domOverlayRef: RefObject<HTMLDivElement | null>;
+  canvasGridMode: boolean;
 };
 
 function getTicketsFromStore(): Ticket[] {
@@ -133,11 +170,22 @@ export function useHybridSdrGrid({
   const layoutRef = useRef<TicketSlot[]>([]);
   const scrollTopRef = useRef(0);
   const cssWidthRef = useRef(0);
+  const viewportHeightRef = useRef(DESKTOP_CATALOG_VIEWPORT_HEIGHT);
   const [layoutWidth, setLayoutWidth] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(
+    DESKTOP_CATALOG_VIEWPORT_HEIGHT,
+  );
+  const [canvasGridModeState, setCanvasGridModeState] = useState(false);
   const animationRef = useRef<ActiveAnimation | null>(null);
   const animationRafRef = useRef<number | null>(null);
   const scrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollMetricsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollDomRafRef = useRef<number | null>(null);
+  const scrollTileRafRef = useRef<number | null>(null);
+  const domScrollBandKeyRef = useRef(-1);
+  const scrollTileBandKeyRef = useRef(-1);
+  const addAnimationActiveRef = useRef(false);
+  const animCanvasOnlyRef = useRef(false);
   const addOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isScrollingRef = useRef(false);
   const paintAbortRef = useRef<AbortController | null>(null);
@@ -159,9 +207,13 @@ export function useHybridSdrGrid({
   const storeVersionRef = useRef(0);
   const ticketCountRef = useRef(0);
   const gridEpochRef = useRef(0);
+  const layoutModeRef = useRef(isMobileTicketLayout());
+  /** Constrained: DOM bridge until first successful tall-canvas paint. */
+  const constrainedCanvasPaintedRef = useRef(false);
 
   const domPoolReadyRef = useRef(false);
   const [domPoolReady, setDomPoolReady] = useState(false);
+  const [domPoolGeneration, setDomPoolGeneration] = useState(0);
   const [ticketCount, setTicketCount] = useState(0);
   const [contentHeight, setContentHeight] = useState(0);
   const [tileCount, setTileCount] = useState(1);
@@ -171,8 +223,46 @@ export function useHybridSdrGrid({
     return gridEpochRef.current;
   }, []);
 
+  const applyDrawableWidth = useCallback((width: number): boolean => {
+    if (width <= 0) return false;
+    const prevMobile = layoutModeRef.current;
+    const catalogWidth = clampCatalogCssWidth(width);
+    cssWidthRef.current = catalogWidth;
+    setTicketGridLayout(width);
+    setSdrLayoutCssWidth(catalogWidth);
+    syncDisplayScaleForDevice();
+    syncPaintScaleForDevice();
+    setLayoutWidth(getCatalogLayoutWidth(width));
+    const vh = getCatalogViewportHeight(catalogWidth);
+    viewportHeightRef.current = vh;
+    setViewportHeight(vh);
+    setCanvasGridModeState(isCanvasGridMode(catalogWidth));
+    const modeChanged = prevMobile !== isMobileTicketLayout();
+    layoutModeRef.current = isMobileTicketLayout();
+    if (modeChanged) {
+      resetHybridTicketRenderCaches();
+      constrainedCanvasPaintedRef.current = false;
+    }
+    return modeChanged;
+  }, []);
+
   const setTileCanvasRef = useCallback((index: number, el: HTMLCanvasElement | null) => {
     tileCanvasRefs.current[index] = el;
+    if (!el) return;
+    const animating = modeRef.current === "animating";
+    if (el.width > 1 && el.height > 1) {
+      el.style.opacity = animating ? "0" : "1";
+      el.style.visibility = animating ? "hidden" : "visible";
+    }
+  }, []);
+
+  const ensureCanvasTilesVisible = useCallback(() => {
+    const animating = modeRef.current === "animating";
+    for (const tile of tileCanvasRefs.current) {
+      if (!tile || tile.width <= 1 || tile.height <= 1) continue;
+      tile.style.opacity = animating ? "0" : "1";
+      tile.style.visibility = animating ? "hidden" : "visible";
+    }
   }, []);
 
   const waitForTileCanvases = useCallback(async (expectedTiles: number) => {
@@ -213,7 +303,15 @@ export function useHybridSdrGrid({
       const anim = animCanvasRef.current;
       if (anim) anim.style.opacity = next === "animating" ? "1" : "0";
       if (next === "animating") {
-        setDomOverlayVisible(false);
+        if (animCanvasOnlyRef.current) {
+          setDomOverlayVisible(false);
+        } else if (isDomGridMode(cssWidthRef.current)) {
+          setDomOverlayVisible(true);
+        } else {
+          setDomOverlayVisible(false);
+        }
+      } else if (next === "idle" && isDomGridMode(cssWidthRef.current)) {
+        setDomOverlayVisible(true);
       }
       onModeChange?.(next);
     },
@@ -229,11 +327,12 @@ export function useHybridSdrGrid({
 
   const commitGridUiState = useCallback(() => {
     const count = ticketCountRef.current;
+    const cssWidth = cssWidthRef.current;
     setTicketCount(count);
     setContentHeight(count > 0 ? getContentHeight(count) : 0);
     setTileCount(
-      count > 0
-        ? computeSdrTileCount(count, getSdrCompositorScale())
+      isCanvasGridMode(cssWidthRef.current) && count > 0
+        ? computeSdrTileCount(count, getSdrCompositorScale(), cssWidth)
         : 0,
     );
   }, []);
@@ -256,9 +355,11 @@ export function useHybridSdrGrid({
           requestIdleCallback(
             () => {
               scheduleWarmHybridDigitSprites(60);
-              void prefetchHybridTextSprites(getPoolTicketsForWarm(120), {
-                chunkSize: 12,
-              });
+              if (isCanvasGridMode(cssWidthRef.current)) {
+                void prefetchHybridTextSprites(getPoolTicketsForWarm(120), {
+                  chunkSize: 12,
+                });
+              }
             },
             { timeout: 12_000 },
           );
@@ -273,8 +374,14 @@ export function useHybridSdrGrid({
     };
   }, [syncTicketsFromStore]);
 
-  const applyPoolEntriesImperative = useCallback(() => {
+  const applyPoolEntriesImperative = useCallback((indices?: readonly number[]) => {
     const entries = domPoolEntriesRef.current;
+    if (indices) {
+      for (const i of indices) {
+        poolSlotRefs.current[i]?.applyEntry(entries[i]);
+      }
+      return;
+    }
     for (let i = 0; i < HYBRID_DOM_OVERLAY_POOL_SIZE; i++) {
       poolSlotRefs.current[i]?.applyEntry(entries[i]);
     }
@@ -352,7 +459,7 @@ export function useHybridSdrGrid({
     return () => {
       cancelled = true;
     };
-  }, [domPoolReady, applyPoolEntriesImperative]);
+  }, [domPoolReady, domPoolGeneration, applyPoolEntriesImperative]);
 
   useEffect(() => {
     return () => {
@@ -388,8 +495,6 @@ export function useHybridSdrGrid({
     domPoolMountCompleteRef.current = false;
     domPoolMountPromiseRef.current = null;
     domPoolMountResolveRef.current = null;
-    domPoolReadyRef.current = false;
-    setDomPoolReady(false);
     domOverlayActiveRef.current = false;
     setDomOverlayVisible(false);
     onDomOverlayChange?.({ active: false, domNodeCount: 0 });
@@ -404,6 +509,7 @@ export function useHybridSdrGrid({
     for (let i = 0; i < HYBRID_DOM_OVERLAY_POOL_SIZE; i++) {
       entries[i].active = false;
     }
+    setDomPoolGeneration((g) => g + 1);
   }, [onDomOverlayChange, setDomOverlayVisible]);
 
   const resetGridState = useCallback(() => {
@@ -427,6 +533,9 @@ export function useHybridSdrGrid({
     layoutRef.current = [];
     isScrollingRef.current = false;
     scrollTopRef.current = 0;
+    constrainedCanvasPaintedRef.current = false;
+    domScrollBandKeyRef.current = -1;
+    scrollTileBandKeyRef.current = -1;
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
     if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
     if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
@@ -438,12 +547,19 @@ export function useHybridSdrGrid({
 
   const paintTallCanvas = useCallback(
     async (options: PaintTallOptions = {}): Promise<boolean> => {
+    if (!isCanvasGridMode(cssWidthRef.current)) {
+      clearAllTileCanvases();
+      onStatusText?.("DOM grid · native tickets");
+      return true;
+    }
+
     const container = scrollRef.current;
     if (!container || !fontsReadyRef.current) return false;
 
     const cssWidth = cssWidthRef.current || getDrawableWidth(container);
     if (cssWidth <= 0) return false;
     cssWidthRef.current = cssWidth;
+    applyDrawableWidth(cssWidth);
 
     const list = ticketsRef.current;
     const layout = layoutRef.current;
@@ -455,30 +571,38 @@ export function useHybridSdrGrid({
       return true;
     }
 
-    paintAbortRef.current?.abort();
+    const ticketCount = list.length;
+    const total = layout.length;
+
+    if (!coalescedPaintRunningRef.current) {
+      paintAbortRef.current?.abort();
+    }
     const controller = new AbortController();
     paintAbortRef.current = controller;
     const generation = ++tallPaintGenRef.current;
 
-    const ticketCount = list.length;
-    const total = layout.length;
     const compositorScale = getSdrCompositorScale();
-    const expectedTiles = computeSdrTileCount(ticketCount, compositorScale);
+    const expectedTiles = computeSdrTileCount(ticketCount, compositorScale, cssWidth);
     const tileCanvases = await waitForTileCanvases(expectedTiles);
 
     // Device-adaptive virtualization. When the resident-tile budget covers the
     // whole grid (desktop), activeTileRange is undefined → every tile stays
     // resident and scrolling stays zero-paint. On constrained devices only the
     // viewport window is sized; the rest are released by the paint pass.
-    const residentBudget = getResidentTileBudget();
+    const residentBudget = resolveResidentTileBudgetForGrid(
+      ticketCount,
+      compositorScale,
+      cssWidth,
+    );
     const virtualize = residentBudget < expectedTiles;
     const activeTileRange = virtualize
       ? computeVisibleTileRange(
           scrollTopRef.current,
-          VIEWPORT_HEIGHT,
+          viewportHeightRef.current,
           ticketCount,
           compositorScale,
           residentBudget,
+          cssWidth,
         )
       : undefined;
     tileWindowRef.current = activeTileRange ?? null;
@@ -487,7 +611,11 @@ export function useHybridSdrGrid({
     onStatusText?.("Compositing hybrid tiles…");
 
     const isFullGrid = !options.rowRange;
-    const chunkSize = isFullGrid ? total : Math.min(total, 64);
+    const chunkSize = isFullGrid
+      ? isConstrainedDevice()
+        ? CONSTRAINED_PAINT_CHUNK_SIZE
+        : total
+      : Math.min(total, isConstrainedDevice() ? CONSTRAINED_PAINT_CHUNK_SIZE : 64);
 
     let ok = await paintTiledTallCanvasSdrChunked({
       tileCanvases,
@@ -516,7 +644,7 @@ export function useHybridSdrGrid({
         ticketCount,
         layout,
         tickets: list,
-        chunkSize: total,
+        chunkSize: isConstrainedDevice() ? CONSTRAINED_PAINT_CHUNK_SIZE : total,
         signal: controller.signal,
         fullClear: true,
         activeTileRange,
@@ -534,22 +662,144 @@ export function useHybridSdrGrid({
       onStatusText?.(
         `SDR ${compositorScale}× · ${residentLabel} tile(s) · ${total} tickets`,
       );
+      constrainedCanvasPaintedRef.current = true;
+      ensureCanvasTilesVisible();
+      if (isConstrainedDevice() && domOverlayActiveRef.current) {
+        domOverlayActiveRef.current = false;
+        setDomOverlayVisible(false);
+        onDomOverlayChange?.({ active: false, domNodeCount: 0 });
+        for (let i = 0; i < HYBRID_DOM_OVERLAY_POOL_SIZE; i++) {
+          const entry = domPoolEntriesRef.current[i];
+          if (entry.active) {
+            entry.active = false;
+            poolSlotRefs.current[i]?.applyEntry(entry);
+          }
+        }
+      }
+      if (modeRef.current !== "animating" && modeRef.current !== "scrolling") {
+        setModeImperative("idle");
+      }
     }
 
     return ok && generation === tallPaintGenRef.current;
   },
-    [clearAllTileCanvases, onPaintProgress, onStatusText, waitForTileCanvases],
+    [
+      applyDrawableWidth,
+      clearAllTileCanvases,
+      ensureCanvasTilesVisible,
+      onDomOverlayChange,
+      onPaintProgress,
+      onStatusText,
+      setDomOverlayVisible,
+      setModeImperative,
+      waitForTileCanvases,
+    ],
   );
 
+  const rebindDomPoolCore = useCallback(
+    (options?: { allowWhileScrolling?: boolean; force?: boolean }): boolean => {
+      if (addAnimationActiveRef.current) return false;
+      if (animationRef.current) return false;
+      if (!options?.allowWhileScrolling && isScrollingRef.current) return false;
+      if (ticketsRef.current.length === 0) return false;
+      if (!domPoolMountCompleteRef.current) return false;
+
+      const scrollTop = scrollTopRef.current;
+      const slots = getVisibleDomSlots(layoutRef.current, scrollTop, viewportHeightRef.current);
+
+      const { activeCount, changed, changedIndices } = updateDomPoolEntriesInPlace(
+        domPoolEntriesRef.current,
+        slots,
+        ticketByIdRef.current,
+      );
+
+      const indicesToApply = options?.force
+        ? Array.from({ length: getActiveDomPoolSlotCount() }, (_, i) => i)
+        : changedIndices;
+
+      if (options?.force || changed) {
+        for (const i of indicesToApply) {
+          poolSlotRefs.current[i]?.cancelAnimations();
+        }
+        applyPoolEntriesImperative(indicesToApply);
+        onDomOverlayChange?.({ active: true, domNodeCount: activeCount });
+      }
+
+      if (isDomGridMode(cssWidthRef.current) && activeCount > 0) {
+        domOverlayActiveRef.current = true;
+        setDomOverlayVisible(true);
+      } else if (!domOverlayActiveRef.current) {
+        domOverlayActiveRef.current = true;
+        setDomOverlayVisible(true);
+      }
+
+      domScrollBandKeyRef.current = getDomScrollBandKey(
+        scrollTop,
+        viewportHeightRef.current,
+      );
+
+      return options?.force || changed;
+    },
+    [applyPoolEntriesImperative, onDomOverlayChange, setDomOverlayVisible],
+  );
+
+  const rebindDomPool = useCallback(
+    async (options?: { allowWhileScrolling?: boolean; force?: boolean }) => {
+      if (animationRef.current) return;
+      if (!options?.allowWhileScrolling && isScrollingRef.current) return;
+      if (ticketsRef.current.length === 0) return;
+
+      await ensureDomPoolMounted();
+      rebindDomPoolCore(options);
+    },
+    [ensureDomPoolMounted, rebindDomPoolCore],
+  );
+
+  const hideDomOverlay = useCallback(() => {
+    if (isDomGridMode(cssWidthRef.current)) return;
+    if (!domOverlayActiveRef.current) return;
+    domOverlayActiveRef.current = false;
+    setDomOverlayVisible(false);
+    onDomOverlayChange?.({ active: false, domNodeCount: 0 });
+    for (let i = 0; i < HYBRID_DOM_OVERLAY_POOL_SIZE; i++) {
+      const entry = domPoolEntriesRef.current[i];
+      if (entry.active) {
+        entry.active = false;
+        poolSlotRefs.current[i]?.applyEntry(entry);
+      }
+    }
+  }, [onDomOverlayChange, setDomOverlayVisible]);
+
+  const hideDomOverlayIfCanvasCovers = useCallback(() => {
+    if (!domOverlayActiveRef.current) return;
+    if (!tileWindowRef.current) {
+      hideDomOverlay();
+      return;
+    }
+    const list = ticketsRef.current;
+    const cssWidth = cssWidthRef.current;
+    if (list.length === 0 || cssWidth <= 0) return;
+
+    const compositorScale = getSdrCompositorScale();
+    if (
+      !viewportNeedsCanvasTiles(
+        tileCanvasRefs.current,
+        scrollTopRef.current,
+        viewportHeightRef.current,
+        list.length,
+        compositorScale,
+        cssWidth,
+      )
+    ) {
+      hideDomOverlay();
+    }
+  }, [hideDomOverlay]);
+
   /**
-   * Incremental tile virtualization for scroll (constrained devices only — when
-   * tileWindowRef is null we never run, so desktop keeps zero paint on scroll).
-   * Releases tiles that left the window and paints ONLY the tiles that newly
-   * entered, chunked + serialized (run-to-completion + pending re-run, no
-   * mid-tile abort) so a fast scroll can't leave a half-painted tile.
+   * Incremental tile virtualization — paint new tiles before releasing old ones.
    */
   const reconcileTileWindow = useCallback(async () => {
-    if (!tileWindowRef.current) return; // virtualization inactive (desktop)
+    if (!tileWindowRef.current) return;
     if (animationRef.current || coalescedPaintRunningRef.current) return;
     if (!fontsReadyRef.current || !scrollRef.current) return;
 
@@ -571,113 +821,154 @@ export function useHybridSdrGrid({
         const compositorScale = getSdrCompositorScale();
         const next = computeVisibleTileRange(
           scrollTopRef.current,
-          VIEWPORT_HEIGHT,
+          viewportHeightRef.current,
           list.length,
           compositorScale,
-          getResidentTileBudget(),
+          resolveResidentTileBudgetForGrid(list.length, compositorScale, cssWidth),
+          cssWidth,
         );
         const prev = tileWindowRef.current;
         if (prev && prev.start === next.start && prev.end === next.end) break;
 
         const tiles = tileCanvasRefs.current;
 
-        // Release tiles that left the window (cheap — no paint).
-        for (let i = 0; i < tiles.length; i++) {
-          const inPrev = prev ? i >= prev.start && i < prev.end : false;
-          const inNext = i >= next.start && i < next.end;
-          if (inPrev && !inNext) {
-            const c = tiles[i];
-            if (c) clearCanvasElement(c);
-          }
-        }
-
-        // Paint only the tiles that newly entered the window.
         const entered = new Set<number>();
         for (let i = next.start; i < next.end; i++) {
           const inPrev = prev ? i >= prev.start && i < prev.end : false;
           if (!inPrev) entered.add(i);
         }
 
+        if (entered.size > 0) {
+          const tileCanvases = tiles.filter(
+            (c): c is HTMLCanvasElement => c !== null,
+          );
+
+          await paintTiledTallCanvasSdrChunked({
+            tileCanvases,
+            cssWidth,
+            ticketCount: list.length,
+            layout,
+            tickets: list,
+            chunkSize: isConstrainedDevice() ? CONSTRAINED_PAINT_CHUNK_SIZE : 48,
+            fullClear: true,
+            paintTileIndices: entered,
+          });
+          ensureCanvasTilesVisible();
+        }
+
         tileWindowRef.current = next;
-        if (entered.size === 0) break;
 
-        const tileCanvases = tiles.filter(
-          (c): c is HTMLCanvasElement => c !== null,
-        );
+        for (let i = 0; i < tiles.length; i++) {
+          const inNext = i >= next.start && i < next.end;
+          if (!inNext) {
+            const c = tiles[i];
+            if (c) clearCanvasElement(c);
+          }
+        }
 
-        await paintTiledTallCanvasSdrChunked({
-          tileCanvases,
-          cssWidth,
-          ticketCount: list.length,
-          layout,
-          tickets: list,
-          chunkSize: 48,
-          fullClear: true,
-          paintTileIndices: entered,
-        });
+        hideDomOverlayIfCanvasCovers();
       } while (reconcilePendingRef.current);
     } finally {
       reconcileRunningRef.current = false;
     }
-  }, [clearCanvasElement]);
+  }, [clearCanvasElement, ensureCanvasTilesVisible, hideDomOverlayIfCanvasCovers]);
 
-  const rebindDomPool = useCallback(
-    async (options?: { allowWhileScrolling?: boolean }) => {
-      if (animationRef.current) return;
-      if (!options?.allowWhileScrolling && isScrollingRef.current) return;
-      if (ticketsRef.current.length === 0) return;
-
-      await ensureDomPoolMounted();
-
-      const scrollTop = scrollTopRef.current;
-      const slots = getVisibleDomSlots(layoutRef.current, scrollTop, VIEWPORT_HEIGHT);
-
-      const { activeCount, changed } = updateDomPoolEntriesInPlace(
-        domPoolEntriesRef.current,
-        slots,
-        ticketByIdRef.current,
-      );
-
-      if (changed) {
-        applyPoolEntriesImperative();
+  const scheduleScrollDomRebind = useCallback(() => {
+    if (scrollDomRafRef.current !== null) return;
+    scrollDomRafRef.current = requestAnimationFrame(() => {
+      scrollDomRafRef.current = null;
+      if (!domPoolMountCompleteRef.current) {
+        void rebindDomPool({ allowWhileScrolling: true });
+        return;
       }
+      rebindDomPoolCore({ allowWhileScrolling: true });
+    });
+  }, [rebindDomPool, rebindDomPoolCore]);
 
-      domOverlayActiveRef.current = true;
-      setDomOverlayVisible(true);
-      onDomOverlayChange?.({ active: true, domNodeCount: activeCount });
-    },
-    [applyPoolEntriesImperative, ensureDomPoolMounted, onDomOverlayChange, setDomOverlayVisible],
-  );
+  const scheduleScrollTileReconcile = useCallback(() => {
+    if (scrollTileRafRef.current !== null) return;
+    scrollTileRafRef.current = requestAnimationFrame(() => {
+      scrollTileRafRef.current = null;
+      void reconcileTileWindow();
+    });
+  }, [reconcileTileWindow]);
 
-  const hideDomOverlay = useCallback(() => {
-    if (!domOverlayActiveRef.current) return;
-    domOverlayActiveRef.current = false;
-    setDomOverlayVisible(false);
-    onDomOverlayChange?.({ active: false, domNodeCount: 0 });
-    for (let i = 0; i < HYBRID_DOM_OVERLAY_POOL_SIZE; i++) {
-      const entry = domPoolEntriesRef.current[i];
-      if (entry.active) {
-        entry.active = false;
-        poolSlotRefs.current[i]?.applyEntry(entry);
+  /**
+   * Virtualized scroll cover — DOM fills gaps while canvas tiles paint ahead.
+   * Row-band keyed so DOM work only runs when the buffered slice shifts.
+   */
+  const syncScrollCoverLayer = useCallback(() => {
+    if (!isCanvasGridMode(cssWidthRef.current)) return;
+    if (!tileWindowRef.current || animationRef.current) return;
+
+    const list = ticketsRef.current;
+    const cssWidth = cssWidthRef.current;
+    if (list.length === 0 || cssWidth <= 0) return;
+
+    const compositorScale = getSdrCompositorScale();
+    const budget = resolveResidentTileBudgetForGrid(
+      list.length,
+      compositorScale,
+      cssWidth,
+    );
+    const needsCanvas = viewportNeedsCanvasTiles(
+      tileCanvasRefs.current,
+      scrollTopRef.current,
+      viewportHeightRef.current,
+      list.length,
+      compositorScale,
+      cssWidth,
+    );
+
+    if (needsCanvas) {
+      const bandKey = getDomScrollBandKey(scrollTopRef.current, viewportHeightRef.current);
+      if (bandKey !== domScrollBandKeyRef.current) {
+        domScrollBandKeyRef.current = bandKey;
+        scheduleScrollDomRebind();
+      } else if (!domOverlayActiveRef.current) {
+        void rebindDomPool({ allowWhileScrolling: true });
       }
+    } else {
+      hideDomOverlayIfCanvasCovers();
     }
-  }, [onDomOverlayChange, setDomOverlayVisible]);
+
+    const tileKey = getScrollTileBandKey(
+      scrollTopRef.current,
+      viewportHeightRef.current,
+      list.length,
+      compositorScale,
+      budget,
+      cssWidth,
+    );
+    if (tileKey !== scrollTileBandKeyRef.current) {
+      scrollTileBandKeyRef.current = tileKey;
+      scheduleScrollTileReconcile();
+    }
+  }, [
+    hideDomOverlayIfCanvasCovers,
+    rebindDomPool,
+    scheduleScrollDomRebind,
+    scheduleScrollTileReconcile,
+  ]);
 
   const runAfterTallPaint = useCallback(
-    async (onPainted?: () => void) => {
+    async (onPainted?: () => void, options?: { forceDomRebind?: boolean }) => {
       if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
+
+      if (isDomGridMode(cssWidthRef.current)) {
+        await ensureDomPoolMounted();
+        rebindDomPoolCore({
+          allowWhileScrolling: true,
+          force: options?.forceDomRebind,
+        });
+        onPainted?.();
+        return;
+      }
 
       await paintTallCanvas({ fullClear: true });
       onPainted?.();
-
-      if (!domOverlayActiveRef.current && !animationRef.current && !isScrollingRef.current) {
-        addOverlayTimerRef.current = setTimeout(() => {
-          addOverlayTimerRef.current = null;
-          void rebindDomPool({ allowWhileScrolling: true });
-        }, TICKET_ADD_OVERLAY_DELAY_MS);
-      }
     },
-    [paintTallCanvas, rebindDomPool],
+    [ensureDomPoolMounted, paintTallCanvas, rebindDomPoolCore],
   );
 
   /** One full-grid paint per coalesced burst; re-run if adds land during paint (20× CPU safe). */
@@ -689,19 +980,36 @@ export function useHybridSdrGrid({
 
     coalescedPaintRunningRef.current = true;
     try {
+      let ok = false;
       do {
         coalescedPaintPendingRef.current = false;
+        const container = scrollRef.current;
+        if (container) {
+          const w = getDrawableWidth(container);
+          if (w > 0) applyDrawableWidth(w);
+        }
         commitGridUiState();
         await yieldFrame();
-        await paintTallCanvas({ fullClear: true });
+        await yieldFrame();
+
+        if (isDomGridMode(cssWidthRef.current)) {
+          await ensureDomPoolMounted();
+          rebindDomPoolCore({ allowWhileScrolling: true });
+        } else {
+          ok = await paintTallCanvas({ fullClear: true });
+        }
       } while (coalescedPaintPendingRef.current);
+
+      if (!ok && isCanvasGridMode(cssWidthRef.current)) {
+        await paintTallCanvas({ fullClear: true });
+      }
     } finally {
       coalescedPaintRunningRef.current = false;
       if (coalescedPaintPendingRef.current) {
         void flushCoalescedPaint();
       }
     }
-  }, [commitGridUiState, paintTallCanvas]);
+  }, [applyDrawableWidth, commitGridUiState, ensureDomPoolMounted, paintTallCanvas, rebindDomPoolCore]);
 
   const paintAnimFrame = useCallback(() => {
     const canvas = animCanvasRef.current;
@@ -710,26 +1018,66 @@ export function useHybridSdrGrid({
     const cssWidth = cssWidthRef.current;
     if (cssWidth <= 0) return;
 
+    const now = performance.now();
+    if (isAddAnimation(animation)) {
+      paintAddAnimationCanvasSdr({
+        canvas,
+        cssWidth,
+        viewportHeight: viewportHeightRef.current,
+        scrollTop: scrollTopRef.current,
+        tickets: ticketsRef.current,
+        animation,
+        now,
+      });
+      return;
+    }
+
     paintAnimationCanvasSdr({
       canvas,
       cssWidth,
-      viewportHeight: VIEWPORT_HEIGHT,
+      viewportHeight: viewportHeightRef.current,
       scrollTop: scrollTopRef.current,
-      layout: layoutRef.current,
       tickets: ticketsRef.current,
       animation,
-      now: performance.now(),
+      now,
     });
   }, []);
 
+  const finishAddAnimation = useCallback(() => {
+    const animation = animationRef.current;
+    if (!animation || animation.kind !== "add") return;
+
+    animationRef.current = null;
+    animCanvasOnlyRef.current = false;
+    addAnimationActiveRef.current = false;
+    onAnimatingChange?.(false);
+
+    void runAfterTallPaint(
+      () => {
+        const animCanvas = animCanvasRef.current;
+        if (animCanvas) {
+          animCanvas.width = 1;
+          animCanvas.height = 1;
+          animCanvas.getContext("2d")?.clearRect(0, 0, 1, 1);
+        }
+        setModeImperative("idle");
+      },
+      { forceDomRebind: true },
+    );
+  }, [onAnimatingChange, runAfterTallPaint, setModeImperative]);
+
   const finishAnimation = useCallback(() => {
     const animation = animationRef.current;
-    if (!animation) return;
+    if (!animation || animation.kind !== "shuffle") return;
 
+    const wasDomShuffle = isDomGridMode(cssWidthRef.current);
     animationRef.current = null;
     onAnimatingChange?.(false);
 
     ticketsRef.current = animation.nextTickets;
+    ticketByIdRef.current = new Map(
+      animation.nextTickets.map((t) => [t.id, t]),
+    );
     TicketStore.replaceTickets(animation.nextTickets);
     layoutRef.current = buildLayout(
       animation.nextTickets,
@@ -737,15 +1085,18 @@ export function useHybridSdrGrid({
     );
     commitGridUiState();
 
-    void runAfterTallPaint(() => {
-      const animCanvas = animCanvasRef.current;
-      if (animCanvas) {
-        animCanvas.width = 1;
-        animCanvas.height = 1;
-        animCanvas.getContext("2d")?.clearRect(0, 0, 1, 1);
-      }
-      setModeImperative("idle");
-    });
+    void runAfterTallPaint(
+      () => {
+        const animCanvas = animCanvasRef.current;
+        if (animCanvas) {
+          animCanvas.width = 1;
+          animCanvas.height = 1;
+          animCanvas.getContext("2d")?.clearRect(0, 0, 1, 1);
+        }
+        setModeImperative("idle");
+      },
+      { forceDomRebind: wasDomShuffle },
+    );
   }, [commitGridUiState, onAnimatingChange, runAfterTallPaint, setModeImperative]);
 
   const runAnimationFrame = useCallback(function runAnimationFrame() {
@@ -753,13 +1104,33 @@ export function useHybridSdrGrid({
     if (!animation) return;
     const elapsed = performance.now() - animation.startTime;
     paintAnimFrame();
-    if (elapsed >= ANIMATION_MS) {
-      finishAnimation();
+    const duration =
+      animation.kind === "add" ? animation.durationMs : ANIMATION_MS;
+    if (elapsed >= duration) {
+      if (animation.kind === "add") {
+        finishAddAnimation();
+      } else {
+        finishAnimation();
+      }
       animationRafRef.current = null;
       return;
     }
     animationRafRef.current = requestAnimationFrame(runAnimationFrame);
-  }, [finishAnimation, paintAnimFrame]);
+  }, [finishAddAnimation, finishAnimation, paintAnimFrame]);
+
+  const applyShuffleInstant = useCallback(
+    (nextTickets: Ticket[]) => {
+      ticketsRef.current = nextTickets;
+      TicketStore.replaceTickets(nextTickets);
+      layoutRef.current = buildLayout(
+        nextTickets,
+        buildHybridLayoutConfig(cssWidthRef.current),
+      );
+      commitGridUiState();
+      void runAfterTallPaint();
+    },
+    [commitGridUiState, runAfterTallPaint],
+  );
 
   const startAnimation = useCallback(
     (
@@ -768,28 +1139,86 @@ export function useHybridSdrGrid({
       easing: ReorderEasing = "cubic",
     ) => {
       void (async () => {
-        hideDomOverlay();
-        if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
+        const cssWidth = cssWidthRef.current;
+        const config = buildHybridLayoutConfig(cssWidth);
+        const prevLayout = layoutRef.current;
+        const nextLayout = buildLayout(nextTickets, config);
+        const scrollTop = scrollTopRef.current;
 
-        if (transitions.length === 0) {
-          ticketsRef.current = nextTickets;
-          TicketStore.replaceTickets(nextTickets);
-          layoutRef.current = buildLayout(
-            nextTickets,
-            buildHybridLayoutConfig(cssWidthRef.current),
-          );
-          void runAfterTallPaint();
+        const viewportTransitions = filterViewportReorderTransitions(
+          transitions,
+          prevLayout,
+          nextLayout,
+          scrollTop,
+          viewportHeightRef.current,
+        );
+
+        if (viewportTransitions.length === 0) {
+          applyShuffleInstant(nextTickets);
           return;
         }
 
+        const drawIds = getShuffleDrawIds(
+          prevLayout,
+          nextLayout,
+          scrollTop,
+          viewportHeightRef.current,
+        );
+
+        if (isDomGridMode(cssWidthRef.current)) {
+          if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
+
+          await ensureDomPoolMounted();
+
+          domOverlayActiveRef.current = true;
+          setDomOverlayVisible(true);
+
+          animationRef.current = {
+            kind: "shuffle",
+            viewportTransitions,
+            nextLayout,
+            drawIds,
+            startTime: performance.now(),
+            nextTickets,
+            easing,
+          };
+
+          setModeImperative("animating");
+          onAnimatingChange?.(true);
+
+          await runDomViewportShuffleAnimation({
+            drawIds,
+            viewportTransitions,
+            nextLayout,
+            ticketsById: ticketByIdRef.current,
+            poolSlots: poolSlotRefs.current,
+            scrollTop: scrollTopRef.current,
+            viewportHeight: viewportHeightRef.current,
+            easing,
+          });
+
+          finishAnimation();
+          return;
+        }
+
+        hideDomOverlay();
+        if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
+
         await ensureHybridTicketRenderReady();
 
-        const scrollTop = scrollTopRef.current;
-        const viewportRows = getViewportRowRange(scrollTop, VIEWPORT_HEIGHT);
+        const movingTickets = viewportTransitions
+          .map((t) => ticketByIdRef.current.get(t.id))
+          .filter((t): t is Ticket => t !== undefined);
+        void prefetchHybridTextSprites(movingTickets, { chunkSize: 12 });
+
+        const viewportRows = getViewportRowRange(scrollTop, viewportHeightRef.current);
         await paintTallCanvas({ rowRange: viewportRows, fullClear: false });
 
         animationRef.current = {
-          transitions,
+          kind: "shuffle",
+          viewportTransitions,
+          nextLayout,
+          drawIds,
           startTime: performance.now(),
           nextTickets,
           easing,
@@ -805,7 +1234,18 @@ export function useHybridSdrGrid({
         animationRafRef.current = requestAnimationFrame(runAnimationFrame);
       })();
     },
-    [hideDomOverlay, onAnimatingChange, paintAnimFrame, paintTallCanvas, runAfterTallPaint, runAnimationFrame, setModeImperative],
+    [
+      applyShuffleInstant,
+      ensureDomPoolMounted,
+      finishAnimation,
+      hideDomOverlay,
+      onAnimatingChange,
+      paintAnimFrame,
+      paintTallCanvas,
+      runAnimationFrame,
+      setDomOverlayVisible,
+      setModeImperative,
+    ],
   );
 
   const removeBall = useCallback((ball: number) => {
@@ -844,8 +1284,13 @@ export function useHybridSdrGrid({
   const repaint = useCallback(async (): Promise<void> => {
     commitGridUiState();
     await yieldFrame();
+    if (isDomGridMode(cssWidthRef.current)) {
+      await ensureDomPoolMounted();
+      rebindDomPoolCore({ allowWhileScrolling: true });
+      return;
+    }
     await paintTallCanvas({ fullClear: true });
-  }, [commitGridUiState, paintTallCanvas]);
+  }, [commitGridUiState, ensureDomPoolMounted, paintTallCanvas, rebindDomPoolCore]);
 
   useImperativeHandle(handleRef, () => ({ removeBall, shuffle, repaint }), [removeBall, shuffle, repaint]);
 
@@ -869,7 +1314,7 @@ export function useHybridSdrGrid({
   }, [startAnimation]);
 
   const syncLayout = useCallback(
-    (list: Ticket[], prevTickets: Ticket[]): boolean => {
+    (list: Ticket[], _prevTickets: Ticket[]): boolean => {
       const width = cssWidthRef.current;
       if (width <= 0) return false;
       const config = buildHybridLayoutConfig(width);
@@ -882,12 +1327,7 @@ export function useHybridSdrGrid({
         return false;
       }
 
-      const prepended =
-        prevTickets.length > 0 && list.length > prevTickets.length
-          ? tryPrependLayout(prevTickets, list, currentLayout, config)
-          : null;
-
-      layoutRef.current = prepended ?? buildLayout(list, config);
+      layoutRef.current = buildLayout(list, config);
       return true;
     },
     [],
@@ -898,18 +1338,141 @@ export function useHybridSdrGrid({
     resetGridState();
   }, [resetGridState, syncTicketsFromStore]);
 
-  const showDomOverlayImmediate = useCallback(async (addedCount: number) => {
-    commitGridUiState();
-    await yieldFrame();
+  const startAddAnimation = useCallback(
+    async (
+      prevTickets: readonly Ticket[],
+      prevLayout: readonly TicketSlot[],
+      newTicketIds: readonly number[],
+    ): Promise<void> => {
+      const cssWidth = cssWidthRef.current;
+      const config = buildHybridLayoutConfig(cssWidth);
+      const nextLayout = layoutRef.current;
 
-    if (addedCount > 0) {
-      const newTickets = ticketsRef.current.slice(0, addedCount);
-      void prefetchHybridTextSprites(newTickets, { chunkSize: 24 });
-    }
+      const plan = buildAddAnimationPlan(
+        prevTickets,
+        ticketsRef.current,
+        prevLayout,
+        nextLayout,
+        newTicketIds,
+        config,
+        scrollTopRef.current,
+        viewportHeightRef.current,
+      );
 
-    await ensureDomPoolMounted();
-    await rebindDomPool({ allowWhileScrolling: true });
-  }, [commitGridUiState, ensureDomPoolMounted, rebindDomPool]);
+      if (!shouldRunAddAnimation(plan)) {
+        animCanvasOnlyRef.current = false;
+        addAnimationActiveRef.current = false;
+        onAnimatingChange?.(false);
+        setModeImperative("idle");
+        return;
+      }
+
+      await ensureHybridTicketRenderReady();
+
+      const movingTickets = plan.drawIds
+        .map((id) => ticketByIdRef.current.get(id))
+        .filter((t): t is Ticket => t !== undefined);
+      if (movingTickets.length > 0) {
+        void prefetchHybridTextSprites(movingTickets, { chunkSize: 16 });
+      }
+
+      hideDomOverlay();
+      setDomOverlayVisible(false);
+      animCanvasOnlyRef.current = true;
+      addAnimationActiveRef.current = true;
+
+      animationRef.current = {
+        kind: "add",
+        shiftTransitions: plan.shiftTransitions,
+        enterTicketIds: new Set(plan.enterTicketIds),
+        nextLayout,
+        drawIds: [...plan.drawIds],
+        startTime: performance.now(),
+        durationMs: TICKET_ADD_ANIM.DURATION_MS,
+        shiftDurationMs: Math.round(TICKET_ADD_ANIM.DURATION_MS * 0.85),
+      };
+
+      paintAnimFrame();
+      setModeImperative("animating");
+      onAnimatingChange?.(true);
+
+      if (animationRafRef.current !== null) {
+        cancelAnimationFrame(animationRafRef.current);
+      }
+
+      await new Promise<void>((resolve) => {
+        const tick = () => {
+          const animation = animationRef.current;
+          if (!animation || animation.kind !== "add") {
+            resolve();
+            return;
+          }
+          const elapsed = performance.now() - animation.startTime;
+          paintAnimFrame();
+          if (elapsed >= animation.durationMs) {
+            finishAddAnimation();
+            animationRafRef.current = null;
+            resolve();
+            return;
+          }
+          animationRafRef.current = requestAnimationFrame(tick);
+        };
+        animationRafRef.current = requestAnimationFrame(tick);
+      });
+    },
+    [
+      finishAddAnimation,
+      hideDomOverlay,
+      onAnimatingChange,
+      paintAnimFrame,
+      setDomOverlayVisible,
+      setModeImperative,
+    ],
+  );
+
+  const syncGridAfterStoreAdd = useCallback(
+    async (
+      addedCount: number,
+      newTicketIds: readonly number[],
+      prevTickets: readonly Ticket[],
+      prevLayout: readonly TicketSlot[],
+    ) => {
+      commitGridUiState();
+
+      const container = scrollRef.current;
+      if (container) {
+        const w = getDrawableWidth(container);
+        if (w > 0) applyDrawableWidth(w);
+        scrollTopRef.current = 0;
+        container.scrollTo({ top: 0, behavior: "instant" });
+      }
+
+      await yieldFrame();
+
+      if (addedCount > 0) {
+        await startAddAnimation(prevTickets, prevLayout, newTicketIds);
+      }
+
+      if (isDomGridMode(cssWidthRef.current)) {
+        await ensureDomPoolMounted();
+        await rebindDomPool({ allowWhileScrolling: true, force: true });
+        return;
+      }
+
+      if (addedCount > 0) {
+        void prefetchHybridTextSprites(ticketsRef.current.slice(0, addedCount), {
+          chunkSize: 24,
+        });
+      }
+    },
+    [
+      applyDrawableWidth,
+      commitGridUiState,
+      ensureDomPoolMounted,
+      rebindDomPool,
+      startAddAnimation,
+    ],
+  );
 
   const scheduleStoreSync = useCallback(() => {
     const prevTickets = ticketsRef.current;
@@ -932,33 +1495,76 @@ export function useHybridSdrGrid({
       (scrollRef.current ? getDrawableWidth(scrollRef.current) : 0);
     if (width > 0) cssWidthRef.current = width;
 
+    const prevLayoutSnapshot = layoutRef.current.slice();
     const layoutChanged = syncLayout(tickets, prevTickets);
     if (!layoutChanged && tickets.length === prevCount) return;
 
     if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
 
     if (addedCount > 0) {
-      void showDomOverlayImmediate(addedCount);
-    } else if (domOverlayActiveRef.current) {
+      const prevIdSet = new Set(prevTickets.map((t) => t.id));
+      const newTicketIds = tickets
+        .filter((t) => !prevIdSet.has(t.id))
+        .map((t) => t.id);
+
+      void (async () => {
+        await syncGridAfterStoreAdd(
+          addedCount,
+          newTicketIds,
+          prevTickets,
+          prevLayoutSnapshot,
+        );
+
+        if (storeSyncCoalesceRef.current) {
+          clearTimeout(storeSyncCoalesceRef.current);
+          storeSyncCoalesceRef.current = null;
+        }
+
+        if (isCanvasGridMode(cssWidthRef.current)) {
+          await flushCoalescedPaint();
+          hideDomOverlayIfCanvasCovers();
+          return;
+        }
+
+        storeSyncCoalesceRef.current = setTimeout(() => {
+          storeSyncCoalesceRef.current = null;
+          void flushCoalescedPaint();
+        }, STORE_SYNC_COALESCE_MS);
+      })();
+
+      if (coalescedPaintRunningRef.current) {
+        coalescedPaintPendingRef.current = true;
+      }
+      return;
+    }
+
+    if (domOverlayActiveRef.current && isCanvasGridMode(cssWidthRef.current)) {
       hideDomOverlay();
     }
 
     if (storeSyncCoalesceRef.current) {
       clearTimeout(storeSyncCoalesceRef.current);
-    }
-    storeSyncCoalesceRef.current = setTimeout(() => {
       storeSyncCoalesceRef.current = null;
+    }
+
+    if (isCanvasGridMode(cssWidthRef.current)) {
       void flushCoalescedPaint();
-    }, STORE_SYNC_COALESCE_MS);
+    } else {
+      storeSyncCoalesceRef.current = setTimeout(() => {
+        storeSyncCoalesceRef.current = null;
+        void flushCoalescedPaint();
+      }, STORE_SYNC_COALESCE_MS);
+    }
 
     if (coalescedPaintRunningRef.current) {
       coalescedPaintPendingRef.current = true;
     }
   }, [
     hideDomOverlay,
+    hideDomOverlayIfCanvasCovers,
     resetGridState,
     flushCoalescedPaint,
-    showDomOverlayImmediate,
+    syncGridAfterStoreAdd,
     syncLayout,
     syncTicketsFromStoreRefs,
   ]);
@@ -988,9 +1594,21 @@ export function useHybridSdrGrid({
     };
   }, [handleStoreReset, scheduleStoreSync, syncTicketsFromStore]);
 
-  const latest = useRef({ rebindDomPool, hideDomOverlay, onScrollMetrics, reconcileTileWindow });
+  const latest = useRef({
+    rebindDomPool,
+    hideDomOverlay,
+    onScrollMetrics,
+    reconcileTileWindow,
+    syncScrollCoverLayer,
+  });
   useLayoutEffect(() => {
-    latest.current = { rebindDomPool, hideDomOverlay, onScrollMetrics, reconcileTileWindow };
+    latest.current = {
+      rebindDomPool,
+      hideDomOverlay,
+      onScrollMetrics,
+      reconcileTileWindow,
+      syncScrollCoverLayer,
+    };
   });
 
   useLayoutEffect(() => {
@@ -998,33 +1616,45 @@ export function useHybridSdrGrid({
     if (!container) return;
     const width = getDrawableWidth(container);
     if (width > 0) {
-      cssWidthRef.current = width;
-      setLayoutWidth(width);
+      applyDrawableWidth(width);
     }
-  }, []);
+  }, [applyDrawableWidth]);
 
   useEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
 
-    cssWidthRef.current = getDrawableWidth(container);
-    setLayoutWidth(cssWidthRef.current);
+    applyDrawableWidth(getDrawableWidth(container));
 
     const observer = new ResizeObserver(() => {
       const nextWidth = getDrawableWidth(container);
-      if (Math.abs(nextWidth - cssWidthRef.current) < 0.5) return;
-      cssWidthRef.current = nextWidth;
-      setLayoutWidth(nextWidth);
+      const prevLayoutWidth = cssWidthRef.current;
+      const modeChanged = applyDrawableWidth(nextWidth);
+      const layoutWidthChanged =
+        Math.abs(cssWidthRef.current - prevLayoutWidth) >= 0.5;
       if (ticketsRef.current.length === 0) return;
-      void resetSdrSpriteCache().then(() => {
+      if (!modeChanged && !layoutWidthChanged) return;
+      if (modeChanged) {
+        scrollTopRef.current = 0;
+        container.scrollTop = 0;
+        domScrollBandKeyRef.current = -1;
+        resetDomPoolCompletely();
+      }
+      const catalogWidth = cssWidthRef.current;
+      void (async () => {
         layoutRef.current = buildLayout(
           ticketsRef.current,
           buildHybridLayoutConfig(nextWidth),
         );
-        void paintTallCanvas({ fullClear: true }).then(() => {
-          void latest.current.rebindDomPool({ allowWhileScrolling: true });
-        });
-      });
+        commitGridUiState();
+        if (isDomGridMode(catalogWidth)) {
+          await ensureDomPoolMounted();
+          await rebindDomPool({ allowWhileScrolling: true, force: modeChanged });
+          return;
+        }
+        await resetSdrSpriteCache();
+        await paintTallCanvas({ fullClear: true });
+      })();
     });
     observer.observe(container);
 
@@ -1044,10 +1674,6 @@ export function useHybridSdrGrid({
     const onScroll = () => {
       scrollTopRef.current = container.scrollTop;
 
-      // Constrained devices only: shift the resident tile window as we scroll.
-      // No-ops on desktop (reconcile returns immediately when window is null).
-      void latest.current.reconcileTileWindow();
-
       if (addOverlayTimerRef.current) {
         clearTimeout(addOverlayTimerRef.current);
         addOverlayTimerRef.current = null;
@@ -1055,11 +1681,20 @@ export function useHybridSdrGrid({
 
       if (!isScrollingRef.current) {
         isScrollingRef.current = true;
-        modeRef.current = "scrolling";
+        setModeImperative("scrolling");
       }
 
-      if (domOverlayActiveRef.current) {
-        latest.current.hideDomOverlay();
+      if (isCanvasGridMode(cssWidthRef.current)) {
+        latest.current.syncScrollCoverLayer();
+      } else {
+        const bandKey = getDomScrollBandKey(
+          scrollTopRef.current,
+          viewportHeightRef.current,
+        );
+        if (bandKey !== domScrollBandKeyRef.current) {
+          domScrollBandKeyRef.current = bandKey;
+          scheduleScrollDomRebind();
+        }
       }
 
       if (!metricsScrolling) {
@@ -1076,9 +1711,19 @@ export function useHybridSdrGrid({
       if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
       scrollIdleTimerRef.current = setTimeout(() => {
         isScrollingRef.current = false;
-        modeRef.current = "idle";
+        setModeImperative("idle");
         if (!animationRef.current) {
-          void latest.current.rebindDomPool();
+          domScrollBandKeyRef.current = -1;
+          scrollTileBandKeyRef.current = -1;
+          if (isDomGridMode(cssWidthRef.current)) {
+            void latest.current.rebindDomPool();
+          }
+          if (isCanvasGridMode(cssWidthRef.current) && tileWindowRef.current !== null) {
+            void latest.current.reconcileTileWindow();
+          }
+          if (isCanvasGridMode(cssWidthRef.current)) {
+            latest.current.syncScrollCoverLayer();
+          }
         }
       }, HYBRID_SCROLL_IDLE_MS);
     };
@@ -1088,11 +1733,19 @@ export function useHybridSdrGrid({
     return () => {
       observer.disconnect();
       container.removeEventListener("scroll", onScroll);
+      if (scrollDomRafRef.current !== null) {
+        cancelAnimationFrame(scrollDomRafRef.current);
+        scrollDomRafRef.current = null;
+      }
+      if (scrollTileRafRef.current !== null) {
+        cancelAnimationFrame(scrollTileRafRef.current);
+        scrollTileRafRef.current = null;
+      }
       if (scrollMetricsTimerRef.current) clearTimeout(scrollMetricsTimerRef.current);
       if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
       if (addOverlayTimerRef.current) clearTimeout(addOverlayTimerRef.current);
     };
-  }, [hideDomOverlay, paintTallCanvas]);
+  }, [applyDrawableWidth, ensureDomPoolMounted, hideDomOverlay, paintTallCanvas, rebindDomPool, resetDomPoolCompletely, scheduleScrollDomRebind, setModeImperative, syncScrollCoverLayer]);
 
   useEffect(() => {
     return () => {
@@ -1109,6 +1762,8 @@ export function useHybridSdrGrid({
     contentHeight,
     ticketCount,
     layoutWidth,
+    viewportHeight,
     domOverlayRef,
+    canvasGridMode: canvasGridModeState,
   };
 }

@@ -1,5 +1,3 @@
-import type { TicketSlot } from "@/lib/ticketLayout";
-import { getSdrDisplayScale } from "@/lib/sdrDisplayScale";
 import {
   assertTileFitsPhysical,
   buildSdrTilePlan,
@@ -7,7 +5,13 @@ import {
   resolveMaxRowsPerTile,
   type SdrTilePlan,
 } from "@/lib/sdrCanvasTiles";
-import { ROW_HEIGHT, getTotalRows, type Ticket } from "@/types/ticket";
+import { getSdrDisplayScale } from "@/lib/sdrDisplayScale";
+import {
+  getLayoutRowHeight,
+  getTicketGridColumns,
+} from "@/lib/ticketGridLayout";
+import type { TicketSlot } from "@/lib/ticketLayout";
+import { getTotalRows, TICKET_HEIGHT, type Ticket } from "@/types/ticket";
 import {
   blitSharedChromeAt,
   blitTicketTextAt,
@@ -38,22 +42,13 @@ function syncTileCanvas(
   cssWidth: number,
   cssHeight: number,
   compositorScale: number,
-  tileIndex: number,
 ): CanvasRenderingContext2D | null {
   assertTileFitsPhysical(cssHeight, compositorScale);
   const w = Math.max(1, Math.round(cssWidth * compositorScale));
   const h = Math.max(1, Math.round(cssHeight * compositorScale));
 
-  const sizeChanged = canvas.width !== w || canvas.height !== h;
   if (canvas.width !== w) canvas.width = w;
   if (canvas.height !== h) canvas.height = h;
-
-  if (sizeChanged) {
-    const mb = (w * h * 4) / 1_048_576;
-    console.log(
-      `[tile canvas] tile=${tileIndex} css=${cssWidth}×${cssHeight}px  physical=${w}×${h}px  scale=${compositorScale.toFixed(2)}x  mem≈${mb.toFixed(2)}MB`,
-    );
-  }
 
   canvas.style.visibility = "visible";
   canvas.style.width = `${cssWidth}px`;
@@ -68,18 +63,7 @@ function syncTileCanvas(
 }
 
 function slotRow(slot: TicketSlot): number {
-  return Math.floor(slot.y / ROW_HEIGHT);
-}
-
-function shouldPaintSlot(
-  slot: TicketSlot,
-  plan: SdrTilePlan,
-  rowRange?: { startRow: number; endRow: number },
-): boolean {
-  const row = slotRow(slot);
-  if (row < plan.startRow || row >= plan.endRow) return false;
-  if (rowRange && (row < rowRange.startRow || row >= rowRange.endRow)) return false;
-  return true;
+  return Math.floor(slot.y / getLayoutRowHeight());
 }
 
 /** Clear only the row band being repainted — never wipe unrelated rows on the same tile. */
@@ -94,7 +78,8 @@ function clearRowBandInTile(
   const clearEndRow = Math.min(plan.endRow, rowRange.endRow);
   if (clearEndRow <= clearStartRow) return;
 
-  const y = (clearStartRow - plan.startRow) * ROW_HEIGHT;
+  const rowH = getLayoutRowHeight();
+  const y = (clearStartRow - plan.startRow) * rowH;
   const h = getRowBandCssHeight(clearStartRow, clearEndRow, totalRows);
   if (h <= 0) return;
   ctx.clearRect(0, y, cssWidth, h);
@@ -109,8 +94,10 @@ function paintSlotLayers(
 ): void {
   const x = Math.round(slot.x);
   const y = Math.round(slot.y - tileTop);
-  blitSharedChromeAt(ctx, x, y, displayScale);
-  blitTicketTextAt(ctx, ticket, x, y, displayScale);
+  const w = slot.cardWidth;
+  const h = TICKET_HEIGHT;
+  blitSharedChromeAt(ctx, x, y, displayScale, w, h);
+  blitTicketTextAt(ctx, ticket, x, y, displayScale, w, h);
 }
 
 export type ChunkedTiledPaintArgs = PaintTiledTallCanvasArgs & {
@@ -152,7 +139,7 @@ export async function paintTiledTallCanvasSdrChunked({
 }: ChunkedTiledPaintArgs): Promise<boolean> {
   const compositorScale = getSdrDisplayScale();
   const displayScale = compositorScale;
-  const plans = buildSdrTilePlan(ticketCount, compositorScale);
+  const plans = buildSdrTilePlan(ticketCount, compositorScale, cssWidth);
   const totalRows = getTotalRows(ticketCount);
   const total = layout.length;
   let painted = 0;
@@ -172,7 +159,8 @@ export async function paintTiledTallCanvasSdrChunked({
     } else {
       const inWindow =
         !activeTileRange ||
-        (plan.tileIndex >= activeTileRange.start && plan.tileIndex < activeTileRange.end);
+        (plan.tileIndex >= activeTileRange.start &&
+          plan.tileIndex < activeTileRange.end);
       if (!inWindow) {
         // Out of the virtualization window — release its backing store on full
         // paints; leave partial (rowRange) paints untouched so we never wipe
@@ -182,16 +170,30 @@ export async function paintTiledTallCanvasSdrChunked({
       }
     }
 
-    const slotsInTile = layout
-      .map((slot) => ({ slot }))
-      .filter(({ slot }) => shouldPaintSlot(slot, plan, rowRange));
+    const slotsInTile: { slot: TicketSlot }[] = [];
+    const columns = getTicketGridColumns();
+    const startIdx = plan.startRow * columns;
+    const endIdx = Math.min(layout.length, plan.endRow * columns);
+    for (let idx = startIdx; idx < endIdx; idx++) {
+      const slot = layout[idx];
+      if (rowRange) {
+        const row = slotRow(slot);
+        if (row < rowRange.startRow || row >= rowRange.endRow) continue;
+      }
+      slotsInTile.push({ slot });
+    }
 
     if (!canvas) {
       if (slotsInTile.length > 0) missingCanvasForSlots = true;
       continue;
     }
 
-    const ctx = syncTileCanvas(canvas, cssWidth, plan.cssHeight, compositorScale, plan.tileIndex);
+    const ctx = syncTileCanvas(
+      canvas,
+      cssWidth,
+      plan.cssHeight,
+      compositorScale,
+    );
     if (!ctx) {
       if (slotsInTile.length > 0) missingCanvasForSlots = true;
       continue;
@@ -218,7 +220,9 @@ export async function paintTiledTallCanvasSdrChunked({
 
       offset = end;
       if (offset < slotsInTile.length) {
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
       }
     }
   }
@@ -236,7 +240,8 @@ export async function paintRemainingRowsChunked(
   },
 ): Promise<boolean> {
   const rowsPerChunk =
-    args.rowsPerChunk ?? Math.max(8, resolveMaxRowsPerTile(getSdrDisplayScale()) / 4);
+    args.rowsPerChunk ??
+    Math.max(8, resolveMaxRowsPerTile(getSdrDisplayScale()) / 4);
   for (let start = args.startRow; start < args.endRow; start += rowsPerChunk) {
     if (args.signal?.aborted || args.isScrolling?.()) return false;
     const end = Math.min(start + rowsPerChunk, args.endRow);
@@ -246,7 +251,9 @@ export async function paintRemainingRowsChunked(
       fullClear: false,
     });
     if (!ok) return false;
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
   }
   return true;
 }

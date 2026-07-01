@@ -64,7 +64,7 @@ export const resolveTicketDisplayBufferSize = (
   cssW: number,
   cssH: number,
   dpr: number,
-  paintScale: number,
+  _paintScale: number,
   qualityMode: TicketCanvasQualityMode = "enhanced"
 ): { bufferW: number; bufferH: number; displayScale: number } => {
   if (qualityMode === "enhanced" && isTicketSdrCanvas(dpr)) {
@@ -75,8 +75,17 @@ export const resolveTicketDisplayBufferSize = (
       displayScale,
     };
   }
-  const scale =
-    qualityMode === "enhanced" ? paintScale : resolveTicketCanvasRenderScale(dpr);
+  if (qualityMode === "enhanced") {
+    // HiDPI: output buffer follows display override (2× on phones). paintScale may
+    // be higher for HQ text downsample without growing tile/sprite memory.
+    const displayScale = getDisplayScaleOverride();
+    return {
+      bufferW: Math.max(1, Math.round(cssW * displayScale)),
+      bufferH: Math.max(1, Math.round(cssH * displayScale)),
+      displayScale,
+    };
+  }
+  const scale = resolveTicketCanvasRenderScale(dpr);
   return {
     bufferW: Math.max(1, Math.round(cssW * scale)),
     bufferH: Math.max(1, Math.round(cssH * scale)),

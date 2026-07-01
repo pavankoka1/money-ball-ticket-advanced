@@ -2,7 +2,67 @@
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
-  margin-bottom: 1.5rem;
+}
+
+.controls_dock {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 1001px;
+  margin-inline: auto;
+  gap: 0;
+}
+
+.controls__dockPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.75rem 0.85rem 0.85rem;
+  border-radius: 1rem 1rem 0.75rem 0.75rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  background: linear-gradient(
+    180deg,
+    rgb(8 20 14 / 88%) 0%,
+    rgb(4 10 8 / 94%) 100%
+  );
+  backdrop-filter: blur(10px);
+}
+
+.controls__dockHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.controls__buyLabel {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fda4af;
+}
+
+.controls__dockActions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.controls__dockActions button,
+.controls__ballBtn {
+  padding: 0.35rem 0.65rem;
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 0.5rem;
+  background: rgb(0 0 0 / 35%);
+  color: #fafafa;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.controls__ballRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .controls__group {

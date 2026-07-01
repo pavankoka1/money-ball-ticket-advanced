@@ -45,7 +45,7 @@ export function createTicketFrameLayers(
       applyCanvasPaintQuality(ctx);
       applyCanvasLineQuality(ctx);
       drawReferenceTicketBackground(ctx, width, height);
-      drawReferenceTicketDividersCanvas2D(ctx, scale, height);
+      drawReferenceTicketDividersCanvas2D(ctx, scale, height, width);
     },
     paintText: (ctx, scale) => {
       applyCanvasPaintQuality(ctx);
@@ -58,6 +58,7 @@ export function createTicketFrameLayers(
         quality,
         displayAtlases: options.displayAtlases,
         domMatchedText: options.domMatchedText,
+        ticketWidth: width,
       });
     },
   };

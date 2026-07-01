@@ -67,19 +67,33 @@ class TicketStoreClass extends EventBus {
     } else {
       this.ticketCount += newTickets.length;
       this.sortedIds = [...ids, ...this.sortedIds];
+
+      newTickets.forEach((ticket, index) => {
+        this.tickets[ticket.id] = {
+          ticket,
+          update: {
+            index,
+            cellValues: ticket.cells.map((c) => c.value),
+            cellIsCrown: ticket.cells.map((c) => c.type === "crown"),
+            isWinning: ticket.isWinning,
+          },
+        };
+      });
     }
 
-    newTickets.forEach((ticket, index) => {
-      this.tickets[ticket.id] = {
-        ticket,
-        update: {
-          index: replace ? index : index,
-          cellValues: ticket.cells.map((c) => c.value),
-          cellIsCrown: ticket.cells.map((c) => c.type === "crown"),
-          isWinning: ticket.isWinning,
-        },
-      };
-    });
+    if (replace) {
+      newTickets.forEach((ticket, index) => {
+        this.tickets[ticket.id] = {
+          ticket,
+          update: {
+            index,
+            cellValues: ticket.cells.map((c) => c.value),
+            cellIsCrown: ticket.cells.map((c) => c.type === "crown"),
+            isWinning: ticket.isWinning,
+          },
+        };
+      });
+    }
 
     this.dispatchEvent("add", ids, replace);
     this.dispatchEvent("count", this.ticketCount);

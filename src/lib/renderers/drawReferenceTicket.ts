@@ -34,11 +34,12 @@ import {
   createTicketNumbersBandGradient,
   ticketBodyFont,
   ticketBodyMetrics,
-  ticketCellCenterX,
+  ticketCellCenterXForWidth,
   ticketDomCellTextCenterY,
   ticketIdFont,
+  ticketIdRightXForWidth,
   ticketNumbersBandTop,
-  ticketSeparatorX,
+  ticketSeparatorXForWidth,
 } from "@/lib/ticketDesign";
 import { visualCenterToBaselineY, measureTicketBodyTextPlacement, resolveDomMatchedMiddleAnchorY } from "@/lib/ticketTextMetrics";
 
@@ -55,12 +56,19 @@ function snapTextBaseline(
   return snapToHalfLogicalPixel(value, renderScale);
 }
 
-export function getTicketLayout(height = TICKET_DESIGN_HEIGHT) {
+export function getTicketLayout(
+  height = TICKET_DESIGN_HEIGHT,
+  width = TICKET_DESIGN_WIDTH,
+) {
   const values = REFERENCE_TICKET.values;
   const body = ticketBodyMetrics(height);
 
-  const cellCenterX = values.map((_, index) => ticketCellCenterX(index));
-  const separatorX = values.slice(0, -1).map((_, index) => ticketSeparatorX(index));
+  const cellCenterX = values.map((_, index) =>
+    ticketCellCenterXForWidth(index, width),
+  );
+  const separatorX = values
+    .slice(0, -1)
+    .map((_, index) => ticketSeparatorXForWidth(index, width));
 
   return {
     values,
@@ -120,9 +128,10 @@ export function drawReferenceTicketBackground(
 export function drawReferenceTicketDividersCanvas2D(
   ctx: CanvasRenderingContext2D,
   renderScale = 1,
-  height = TICKET_DESIGN_HEIGHT
+  height = TICKET_DESIGN_HEIGHT,
+  width = TICKET_DESIGN_WIDTH,
 ) {
-  const { separatorX, separatorY } = getTicketLayout(height);
+  const { separatorX, separatorY } = getTicketLayout(height, width);
 
   separatorX.forEach((x) => drawSeparator(ctx, x, separatorY, renderScale));
 }
@@ -138,8 +147,10 @@ function drawTicketId(
   originBufferX = 0,
   originBufferY = 0,
   domMatchedText = false,
+  ticketWidth = TICKET_DESIGN_WIDTH,
 ): void {
   const text = String(ticketId);
+  const idRightX = ticketIdRightXForWidth(ticketWidth);
 
   ctx.font = idFont;
 
@@ -153,7 +164,7 @@ function drawTicketId(
     ctx.fillStyle = TICKET_ID_TEXT.color;
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    ctx.fillText(text, TICKET_ID_RIGHT_X, anchorY);
+    ctx.fillText(text, idRightX, anchorY);
     return;
   }
 
@@ -201,6 +212,7 @@ function drawTicketBodyValue(
   originBufferX = 0,
   originBufferY = 0,
   domMatchedText = false,
+  ticketWidth = TICKET_DESIGN_WIDTH,
 ): void {
   if (domMatchedText) {
     ctx.font = bodyFont;
@@ -213,7 +225,7 @@ function drawTicketBodyValue(
     ctx.fillStyle = TICKET_TEXT.color;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(text, ticketCellCenterX(cellIndex), anchorY);
+    ctx.fillText(text, ticketCellCenterXForWidth(cellIndex, ticketWidth), anchorY);
     return;
   }
 
@@ -256,6 +268,7 @@ export type TicketTextLayerOptions = {
   displayAtlases?: TicketDisplayFontAtlases | { body: FontAtlas; id: FontAtlas };
   /** Native fillText — pixel-match DomTicketCard / Figma layout. */
   domMatchedText?: boolean;
+  ticketWidth?: number;
 };
 
 function resolveBitmapDisplayAtlases(
@@ -286,6 +299,7 @@ export function drawTicketTextLayer(
   const { bodyFont, idFont, renderScale, quality, displayAtlases, domMatchedText } =
     options;
   const ticketId = options.ticketId ?? REFERENCE_TICKET.id;
+  const ticketWidth = options.ticketWidth ?? TICKET_DESIGN_WIDTH;
   const bitmapAtlases = resolveBitmapDisplayAtlases(
     renderScale,
     quality,
@@ -307,6 +321,7 @@ export function drawTicketTextLayer(
       0,
       0,
       domMatchedText,
+      ticketWidth,
     );
     values.forEach((value, index) => {
       drawTicketBodyValue(
@@ -320,6 +335,7 @@ export function drawTicketTextLayer(
         0,
         0,
         domMatchedText,
+        ticketWidth,
       );
     });
     ctx.restore();
@@ -327,7 +343,18 @@ export function drawTicketTextLayer(
   }
 
   ctx.font = bodyFont;
-  drawTicketId(ctx, idFont, renderScale, quality, ticketId, null, 0, 0, domMatchedText);
+  drawTicketId(
+    ctx,
+    idFont,
+    renderScale,
+    quality,
+    ticketId,
+    null,
+    0,
+    0,
+    domMatchedText,
+    ticketWidth,
+  );
 
   values.forEach((value, index) => {
     drawTicketBodyValue(
@@ -341,6 +368,7 @@ export function drawTicketTextLayer(
       0,
       0,
       domMatchedText,
+      ticketWidth,
     );
   });
 }
@@ -366,6 +394,7 @@ export function drawTicketTextOnDisplay(
   } = options;
   const ticketId = options.ticketId ?? REFERENCE_TICKET.id;
   const domMatchedText = options.domMatchedText ?? false;
+  const ticketWidth = options.ticketWidth ?? TICKET_DESIGN_WIDTH;
   const bitmapAtlases = resolveBitmapDisplayAtlases(
     renderScale,
     quality,
@@ -390,6 +419,7 @@ export function drawTicketTextOnDisplay(
       originBufferX,
       originBufferY,
       domMatchedText,
+      ticketWidth,
     );
     values.forEach((value, index) => {
       drawTicketBodyValue(
@@ -403,6 +433,7 @@ export function drawTicketTextOnDisplay(
         originBufferX,
         originBufferY,
         domMatchedText,
+        ticketWidth,
       );
     });
     displayCtx.restore();
@@ -429,6 +460,7 @@ export function drawTicketTextOnDisplay(
     0,
     0,
     domMatchedText,
+    ticketWidth,
   );
   values.forEach((value, index) => {
     drawTicketBodyValue(
@@ -442,6 +474,7 @@ export function drawTicketTextOnDisplay(
       0,
       0,
       domMatchedText,
+      ticketWidth,
     );
   });
   displayCtx.restore();
@@ -461,7 +494,7 @@ export function drawReferenceTicketChrome(
   applyCanvasLineQuality(ctx);
 
   drawReferenceTicketBackground(ctx, width, height);
-  drawReferenceTicketDividersCanvas2D(ctx, renderScale, height);
+  drawReferenceTicketDividersCanvas2D(ctx, renderScale, height, width);
   drawTicketId(ctx, idFont ?? ticketIdFont(), renderScale, quality);
 }
 
@@ -475,7 +508,7 @@ export function drawReferenceTicketShapes(
   applyCanvasPaintQuality(ctx);
   applyCanvasLineQuality(ctx);
   drawReferenceTicketBackground(ctx, width, height);
-  drawReferenceTicketDividersCanvas2D(ctx, renderScale, height);
+  drawReferenceTicketDividersCanvas2D(ctx, renderScale, height, width);
 }
 
 /**

@@ -1,52 +1,109 @@
 import { snapToDevicePixel } from "@/lib/canvasSetup";
-import { TICKET_DESIGN_WIDTH } from "@/lib/ticketDesign";
+import {
+  MOBILE_ROW_GAP,
+  DESKTOP_ROW_GAP,
+  resolveIsMobileTicketLayout,
+  resolveTicketGridColumns,
+  getTicketGridColumns,
+  getLayoutRowHeight,
+} from "@/lib/ticketGridLayout";
+import {
+  clampCatalogCssWidth,
+  DESKTOP_CATALOG_MAX_WIDTH,
+} from "@/lib/catalogLayout";
+import { DESKTOP_TICKETS_PER_ROW } from "@/lib/ticketGridLayout";
+import { TICKET_DESIGN_WIDTH, TICKET_MOBILE_DESIGN_WIDTH } from "@/lib/ticketDesign";
 import { getSdrDisplayScale } from "@/lib/sdrDisplayScale";
 import type { Ticket } from "@/types/ticket";
 import {
   GRID_PADDING,
   ROW_GAP,
-  ROW_HEIGHT,
-  TICKETS_PER_ROW,
   TICKET_HEIGHT,
   getContentHeight,
 } from "@/types/ticket";
 
 export type LayoutConfig = {
   cssWidth: number;
+  columns: number;
   padding?: number;
-  /** Native ticket width — grid is horizontally centred in cssWidth (hybrid path). */
+  rowGap?: number;
+  /** When true, tickets pack from the left edge (no horizontal centring). */
+  edgeAligned?: boolean;
   fixedCardWidth?: number;
 };
 
-export function getFixedTicketRowWidth(cardWidth = TICKET_DESIGN_WIDTH): number {
-  return TICKETS_PER_ROW * cardWidth + (TICKETS_PER_ROW - 1) * ROW_GAP;
+export function getFixedTicketRowWidth(
+  columns: number,
+  cardWidth = TICKET_DESIGN_WIDTH,
+  rowGap = ROW_GAP,
+): number {
+  return columns * cardWidth + (columns - 1) * rowGap;
 }
 
 export function resolveCenteredGridPadding(
   cssWidth: number,
+  columns: number,
   cardWidth = TICKET_DESIGN_WIDTH,
+  rowGap = ROW_GAP,
 ): number {
-  const raw = Math.max(0, (cssWidth - getFixedTicketRowWidth(cardWidth)) / 2);
+  const raw = Math.max(
+    0,
+    (cssWidth - getFixedTicketRowWidth(columns, cardWidth, rowGap)) / 2,
+  );
   const scale =
     typeof window !== "undefined" ? getSdrDisplayScale() : 1;
   return snapToDevicePixel(raw, scale);
 }
 
-/** Hybrid grid: fixed 197×43 tickets, centred with equal side padding. */
+/** Hybrid grid — mobile: 1–2 × 181px centred; desktop: fixed 1001px, 5 × 197px, 4px gap. */
 export function buildHybridLayoutConfig(cssWidth: number): LayoutConfig {
-  return { cssWidth, padding: 0, fixedCardWidth: TICKET_DESIGN_WIDTH };
+  const mobile = resolveIsMobileTicketLayout(cssWidth);
+  if (mobile) {
+    const catalogWidth = clampCatalogCssWidth(cssWidth);
+    return {
+      cssWidth: catalogWidth,
+      columns: resolveTicketGridColumns(catalogWidth),
+      padding: 0,
+      rowGap: MOBILE_ROW_GAP,
+      fixedCardWidth: TICKET_MOBILE_DESIGN_WIDTH,
+    };
+  }
+  return {
+    cssWidth: DESKTOP_CATALOG_MAX_WIDTH,
+    columns: DESKTOP_TICKETS_PER_ROW,
+    padding: 0,
+    rowGap: DESKTOP_ROW_GAP,
+    fixedCardWidth: TICKET_DESIGN_WIDTH,
+  };
+}
+
+function resolveLayoutRowGap(config: LayoutConfig): number {
+  return config.rowGap ?? ROW_GAP;
+}
+
+function resolveLayoutRowHeight(config: LayoutConfig): number {
+  return TICKET_HEIGHT + resolveLayoutRowGap(config);
 }
 
 function resolveLayoutPadding(config: LayoutConfig): number {
+  if (config.edgeAligned) return config.padding ?? 0;
   if (config.fixedCardWidth) {
-    return resolveCenteredGridPadding(config.cssWidth, config.fixedCardWidth);
+    return resolveCenteredGridPadding(
+      config.cssWidth,
+      config.columns,
+      config.fixedCardWidth,
+      resolveLayoutRowGap(config),
+    );
   }
   return config.padding ?? GRID_PADDING;
 }
 
 function resolveCardWidth(config: LayoutConfig): number {
   if (config.fixedCardWidth) return config.fixedCardWidth;
-  return getCardWidth(config.cssWidth, config.padding ?? GRID_PADDING);
+  const padding = config.padding ?? GRID_PADDING;
+  const rowGap = resolveLayoutRowGap(config);
+  const innerWidth = config.cssWidth - padding * 2;
+  return (innerWidth - rowGap * (config.columns - 1)) / config.columns;
 }
 
 export type TicketSlot = {
@@ -67,22 +124,60 @@ export type ReorderTransition = {
   toY: number;
 };
 
-export function getCardWidth(cssWidth: number, padding = GRID_PADDING) {
+export function getCardWidth(
+  cssWidth: number,
+  columns: number,
+  padding = GRID_PADDING,
+) {
   const innerWidth = cssWidth - padding * 2;
-  return (innerWidth - ROW_GAP * (TICKETS_PER_ROW - 1)) / TICKETS_PER_ROW;
+  return (innerWidth - ROW_GAP * (columns - 1)) / columns;
+}
+
+function resolveLastRowOffsetX(
+  config: LayoutConfig,
+  row: number,
+  col: number,
+  totalCount: number,
+): number {
+  const columns = config.columns;
+  if (totalCount <= 0 || columns <= 1) return 0;
+
+  const ticketsInLastRow = totalCount % columns || columns;
+  if (ticketsInLastRow >= columns) return 0;
+
+  const totalRows = Math.ceil(totalCount / columns);
+  if (row !== totalRows - 1 || col >= ticketsInLastRow) return 0;
+
+  const cardWidth = resolveCardWidth(config);
+  const rowGap = resolveLayoutRowGap(config);
+  const fullRowWidth = columns * cardWidth + (columns - 1) * rowGap;
+  const partialRowWidth =
+    ticketsInLastRow * cardWidth + (ticketsInLastRow - 1) * rowGap;
+  const raw = (fullRowWidth - partialRowWidth) / 2;
+  const scale =
+    typeof window !== "undefined" ? getSdrDisplayScale() : 1;
+  return snapToDevicePixel(raw, scale);
 }
 
 export function getSlotForIndex(
   index: number,
   config: LayoutConfig,
+  totalCount?: number,
 ): Pick<TicketSlot, "x" | "y"> {
   const padding = resolveLayoutPadding(config);
   const cardWidth = resolveCardWidth(config);
-  const row = Math.floor(index / TICKETS_PER_ROW);
-  const col = index % TICKETS_PER_ROW;
+  const columns = config.columns;
+  const rowGap = resolveLayoutRowGap(config);
+  const rowHeight = resolveLayoutRowHeight(config);
+  const row = Math.floor(index / columns);
+  const col = index % columns;
+  const lastRowOffsetX =
+    totalCount !== undefined
+      ? resolveLastRowOffsetX(config, row, col, totalCount)
+      : 0;
   return {
-    x: padding + col * (cardWidth + ROW_GAP),
-    y: row * ROW_HEIGHT,
+    x: padding + lastRowOffsetX + col * (cardWidth + rowGap),
+    y: row * rowHeight,
   };
 }
 
@@ -92,26 +187,23 @@ export function buildLayout(
 ): TicketSlot[] {
   const cardWidth = resolveCardWidth(config);
   return tickets.map((ticket, index) => {
-    const { x, y } = getSlotForIndex(index, config);
+    const { x, y } = getSlotForIndex(index, config, tickets.length);
     return { id: ticket.id, index, x, y, cardWidth };
   });
 }
 
-/**
- * Bundle adds prepend at the top — shift existing slot Y values instead of a full
- * O(n) layout rebuild.
- */
 export function prependTicketsLayout(
   prependedTickets: Ticket[],
   existingLayout: TicketSlot[],
   config: LayoutConfig,
 ): TicketSlot[] {
-  const cardWidth = resolveCardWidth(config);
   const yShift =
-    Math.ceil(prependedTickets.length / TICKETS_PER_ROW) * ROW_HEIGHT;
+    Math.ceil(prependedTickets.length / config.columns) *
+    resolveLayoutRowHeight(config);
 
   const newSlots: TicketSlot[] = prependedTickets.map((ticket, index) => {
     const { x, y } = getSlotForIndex(index, config);
+    const cardWidth = resolveCardWidth(config);
     return { id: ticket.id, index, x, y, cardWidth };
   });
 
@@ -124,7 +216,6 @@ export function prependTicketsLayout(
   return [...newSlots, ...shifted];
 }
 
-/** Detect top-prepend adds (bundle buttons) and return shifted layout. */
 export function tryPrependLayout(
   prevTickets: Ticket[],
   nextTickets: Ticket[],
@@ -150,7 +241,6 @@ export function tryPrependLayout(
   return prependTicketsLayout(nextTickets.slice(0, added), prevLayout, config);
 }
 
-/** How many cells match the removed ball (higher = closer to top). */
 export function getMatchScore(ticket: Ticket, ball: number) {
   return ticket.cells.filter(
     (cell) => cell.type === "number" && cell.value === ball,
@@ -179,13 +269,10 @@ export function shuffleTickets(tickets: Ticket[]): Ticket[] {
   return arr;
 }
 
-/** Inner width available for painting (excludes container padding). */
 export function getDrawableWidth(container: HTMLElement) {
   const style = getComputedStyle(container);
   const padL = parseFloat(style.paddingLeft) || 0;
   const padR = parseFloat(style.paddingRight) || 0;
-  // Floor to whole CSS px so canvas backing store, layout grid, and DOM overlay
-  // share one integer width (avoids subpixel canvas scale vs 197px tickets).
   return Math.max(0, Math.floor(container.clientWidth - padL - padR));
 }
 
@@ -201,8 +288,8 @@ export function computeReorderTransitions(
     const fromIndex = prevIndexById.get(ticket.id);
     if (fromIndex === undefined || fromIndex === toIndex) return;
 
-    const from = getSlotForIndex(fromIndex, config);
-    const to = getSlotForIndex(toIndex, config);
+    const from = getSlotForIndex(fromIndex, config, nextTickets.length);
+    const to = getSlotForIndex(toIndex, config, nextTickets.length);
 
     transitions.push({
       id: ticket.id,
@@ -218,6 +305,163 @@ export function computeReorderTransitions(
   return transitions;
 }
 
+/** Extra rows above/below viewport included in shuffle animation band. */
+export const SHUFFLE_VIEWPORT_MARGIN_ROWS = 1;
+
+export function getViewportSlotIndexRange(
+  totalSlots: number,
+  scrollTop: number,
+  viewportHeight: number,
+  marginRows = SHUFFLE_VIEWPORT_MARGIN_ROWS,
+): { startIndex: number; endIndex: number } {
+  const columns = getTicketGridColumns();
+  const margin = marginRows * getLayoutRowHeight();
+  return getVisibleSlotIndexRange(
+    totalSlots,
+    scrollTop,
+    viewportHeight,
+    columns,
+    margin,
+  );
+}
+
+/** Ticket ids whose slots intersect the viewport band (prev or next layout). */
+export function getViewportTicketIds(
+  layout: readonly TicketSlot[],
+  scrollTop: number,
+  viewportHeight: number,
+  marginRows = SHUFFLE_VIEWPORT_MARGIN_ROWS,
+): Set<number> {
+  const { startIndex, endIndex } = getViewportSlotIndexRange(
+    layout.length,
+    scrollTop,
+    viewportHeight,
+    marginRows,
+  );
+  const ids = new Set<number>();
+  for (let i = startIndex; i < endIndex; i++) {
+    const slot = layout[i];
+    if (slot) ids.add(slot.id);
+  }
+  return ids;
+}
+
+/**
+ * Only animate tickets entering or leaving the viewport band — not the full catalog.
+ * Union of prev-viewport ids and next-viewport ids (catalogUtils pattern).
+ */
+export function filterViewportReorderTransitions(
+  transitions: readonly ReorderTransition[],
+  prevLayout: readonly TicketSlot[],
+  nextLayout: readonly TicketSlot[],
+  scrollTop: number,
+  viewportHeight: number,
+  marginRows = SHUFFLE_VIEWPORT_MARGIN_ROWS,
+): ReorderTransition[] {
+  const prevVisible = getViewportTicketIds(
+    prevLayout,
+    scrollTop,
+    viewportHeight,
+    marginRows,
+  );
+  const nextVisible = getViewportTicketIds(
+    nextLayout,
+    scrollTop,
+    viewportHeight,
+    marginRows,
+  );
+  const animateIds = new Set<number>();
+  for (const id of prevVisible) animateIds.add(id);
+  for (const id of nextVisible) animateIds.add(id);
+  return transitions.filter((t) => animateIds.has(t.id));
+}
+
+/** Draw order for shuffle — next-layout order, restricted to the viewport union. */
+export function getShuffleDrawIds(
+  prevLayout: readonly TicketSlot[],
+  nextLayout: readonly TicketSlot[],
+  scrollTop: number,
+  viewportHeight: number,
+  marginRows = SHUFFLE_VIEWPORT_MARGIN_ROWS,
+): number[] {
+  const prevVisible = getViewportTicketIds(
+    prevLayout,
+    scrollTop,
+    viewportHeight,
+    marginRows,
+  );
+  const nextVisible = getViewportTicketIds(
+    nextLayout,
+    scrollTop,
+    viewportHeight,
+    marginRows,
+  );
+  const ids = new Set<number>();
+  for (const id of prevVisible) ids.add(id);
+  for (const id of nextVisible) ids.add(id);
+  return nextLayout.filter((slot) => ids.has(slot.id)).map((slot) => slot.id);
+}
+
+const SHUFFLE_EDGE_GAP = 4;
+
+function slotIntersectsViewport(
+  slotY: number,
+  scrollTop: number,
+  viewportHeight: number,
+): boolean {
+  return (
+    slotY + TICKET_HEIGHT > scrollTop && slotY < scrollTop + viewportHeight
+  );
+}
+
+/**
+ * Shuffle motion endpoints — tickets entering the viewport start just above/below
+ * the visible band instead of flying from their off-screen catalog slot.
+ */
+export function getShuffleAnimationEndpoints(
+  transition: ReorderTransition,
+  scrollTop: number,
+  viewportHeight: number,
+  edgeGap = SHUFFLE_EDGE_GAP,
+): { fromX: number; fromY: number; toX: number; toY: number } {
+  const { fromX, fromY, toX, toY } = transition;
+  const viewTop = scrollTop;
+  const viewBottom = scrollTop + viewportHeight;
+
+  const toInView = slotIntersectsViewport(toY, scrollTop, viewportHeight);
+  const fromInView = slotIntersectsViewport(fromY, scrollTop, viewportHeight);
+
+  let animFromX = fromX;
+  let animFromY = fromY;
+  let animToX = toX;
+  let animToY = toY;
+
+  if (toInView && !fromInView) {
+    // Entering: slide in at destination column from just above/below the viewport.
+    animFromX = toX;
+    if (fromY + TICKET_HEIGHT <= viewTop) {
+      animFromY = viewTop - TICKET_HEIGHT - edgeGap;
+    } else if (fromY >= viewBottom) {
+      animFromY = viewBottom + edgeGap;
+    }
+  } else if (fromInView && !toInView) {
+    // Leaving: exit at destination column (may differ from current column).
+    animToX = toX;
+    if (toY + TICKET_HEIGHT <= viewTop) {
+      animToY = viewTop - TICKET_HEIGHT - edgeGap;
+    } else if (toY >= viewBottom) {
+      animToY = viewBottom + edgeGap;
+    }
+  }
+
+  return {
+    fromX: animFromX,
+    fromY: animFromY,
+    toX: animToX,
+    toY: animToY,
+  };
+}
+
 export function getContentHeightForCount(count: number) {
   return getContentHeight(count);
 }
@@ -226,7 +470,6 @@ export function easeOutCubic(t: number) {
   return 1 - Math.pow(1 - t, 2);
 }
 
-/** Fast start, soft landing — reads more clearly on shuffle/reorder motion. */
 export function easeOutExpo(t: number) {
   return t >= 1 ? 1 : 1 - 2 ** (-10 * t);
 }
@@ -235,12 +478,11 @@ export function lerp(from: number, to: number, t: number) {
   return from + (to - from) * t;
 }
 
-/** Tickets visible in viewport (+ margin for animating tickets). */
 export function getVisibleTicketIds(
   slots: TicketSlot[],
   scrollTop: number,
   viewportHeight: number,
-  margin = ROW_HEIGHT,
+  margin = getLayoutRowHeight(),
 ) {
   const minY = scrollTop - margin;
   const maxY = scrollTop + viewportHeight + margin;
@@ -252,11 +494,11 @@ export function getVisibleTicketIds(
     .map((slot) => slot.id);
 }
 
-/** Index range for layout slots intersecting the viewport (+ vertical margin). */
 export function getVisibleSlotIndexRange(
   totalSlots: number,
   scrollTop: number,
   viewportHeight: number,
+  columns: number,
   verticalMargin = 20,
 ): { startIndex: number; endIndex: number } {
   if (totalSlots <= 0) {
@@ -265,9 +507,10 @@ export function getVisibleSlotIndexRange(
 
   const top = scrollTop - verticalMargin;
   const bottom = scrollTop + viewportHeight + verticalMargin;
-  const firstRow = Math.max(0, Math.floor(top / ROW_HEIGHT));
-  const lastRow = Math.max(0, Math.floor(bottom / ROW_HEIGHT));
-  const startIndex = Math.min(totalSlots, firstRow * TICKETS_PER_ROW);
-  const endIndex = Math.min(totalSlots, (lastRow + 1) * TICKETS_PER_ROW);
+  const rowH = getLayoutRowHeight();
+  const firstRow = Math.max(0, Math.floor(top / rowH));
+  const lastRow = Math.max(0, Math.floor(bottom / rowH));
+  const startIndex = Math.min(totalSlots, firstRow * columns);
+  const endIndex = Math.min(totalSlots, (lastRow + 1) * columns);
   return { startIndex, endIndex: Math.max(startIndex, endIndex) };
 }

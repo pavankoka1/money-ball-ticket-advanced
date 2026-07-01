@@ -15,6 +15,9 @@ export const TICKET_DESIGN_WIDTH =
 export const TICKET_DESIGN_HEIGHT = 43;
 export const TICKET_RADIUS = 5;
 
+/** Mobile Figma ticket — fixed 181×43, centred in the parent (not fluid). */
+export const TICKET_MOBILE_DESIGN_WIDTH = 181;
+
 export const TICKET_COLORS = {
   cream: "#f8eadb",
   white: "#ffffff",
@@ -141,6 +144,49 @@ export function ticketSeparatorX(index: number): number {
   return (index + 1) * TICKET_CELL_WIDTH + index * TICKET_SEPARATOR_WIDTH;
 }
 
+/** Flex cell width for tickets narrower than the 197px desktop grid (e.g. 181px mobile). */
+export function ticketFlexCellWidth(ticketWidth: number): number {
+  const totalSeparatorW = TICKET_SEPARATOR_COUNT * TICKET_SEPARATOR_WIDTH;
+  return (ticketWidth - totalSeparatorW) / TICKET_CELL_COUNT;
+}
+
+/** Horizontal centre of cell `index` on a flex-width ticket. */
+export function ticketFlexCellCenterX(
+  index: number,
+  ticketWidth: number,
+): number {
+  const cellW = ticketFlexCellWidth(ticketWidth);
+  return index * (cellW + TICKET_SEPARATOR_WIDTH) + cellW / 2;
+}
+
+/** Left edge of separator after cell `index` on a flex-width ticket. */
+export function ticketFlexSeparatorX(index: number, ticketWidth: number): number {
+  const cellW = ticketFlexCellWidth(ticketWidth);
+  return (index + 1) * cellW + index * TICKET_SEPARATOR_WIDTH;
+}
+
+export function ticketCellCenterXForWidth(
+  index: number,
+  ticketWidth: number,
+): number {
+  return ticketWidth === TICKET_DESIGN_WIDTH
+    ? ticketCellCenterX(index)
+    : ticketFlexCellCenterX(index, ticketWidth);
+}
+
+export function ticketSeparatorXForWidth(
+  index: number,
+  ticketWidth: number,
+): number {
+  return ticketWidth === TICKET_DESIGN_WIDTH
+    ? ticketSeparatorX(index)
+    : ticketFlexSeparatorX(index, ticketWidth);
+}
+
+export function ticketIdRightXForWidth(ticketWidth: number): number {
+  return ticketWidth - TICKET_ID_TEXT.rightPad;
+}
+
 export function ticketBodyMetrics(height = TICKET_DESIGN_HEIGHT) {
   const numbersBandTop = ticketNumbersBandTop(height);
   const numbersBandHeight = TICKET_NUMBERS_BAND_HEIGHT;
@@ -166,6 +212,31 @@ export function ticketBodyFont() {
 export function ticketIdFont() {
   return `${TICKET_ID_TEXT.weight} ${TICKET_ID_TEXT.size}px ${TICKET_ID_TEXT.family}`;
 }
+
+/** Mobile ticket typography — matches Figma / production bingo mobile. */
+export const TICKET_MOBILE_TEXT = {
+  family: "Onest, system-ui, sans-serif",
+  size: 15,
+  weight: 700,
+  color: "#704F4F",
+} as const;
+
+export const TICKET_MOBILE_ID_TEXT = {
+  family: "Onest, system-ui, sans-serif",
+  size: 10,
+  weight: 700,
+  color: "#B19797",
+  rightPad: 6,
+} as const;
+
+export function ticketMobileBodyFont() {
+  return `${TICKET_MOBILE_TEXT.weight} ${TICKET_MOBILE_TEXT.size}px ${TICKET_MOBILE_TEXT.family}`;
+}
+
+export function ticketMobileIdFont() {
+  return `${TICKET_MOBILE_ID_TEXT.weight} ${TICKET_MOBILE_ID_TEXT.size}px ${TICKET_MOBILE_ID_TEXT.family}`;
+}
+
 
 /** Canvas gradient matching SVG `linear-gradient(180deg, #FFF 0%, #F3EAE0 100%)`. */
 export function createTicketNumbersBandGradient(

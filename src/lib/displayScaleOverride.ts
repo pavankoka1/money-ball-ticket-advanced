@@ -5,6 +5,12 @@
  * Affects both tile-canvas backing store size and sprite buffer size.
  */
 
+import {
+  capScaleForConstrainedDevice,
+  CONSTRAINED_MAX_DISPLAY_SCALE,
+  isConstrainedDevice,
+} from "@/lib/deviceMemoryBudget";
+
 function _naturalPaintScale(dpr: number): number {
   if (dpr >= 2) return dpr * 4;
   return Math.max(dpr * 2, 8);
@@ -18,10 +24,22 @@ function _naturalDisplayScale(dpr: number): number {
 
 const _nativeDpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
 
-let _displayScaleOverride: number = _naturalDisplayScale(_nativeDpr);
+let _displayScaleOverride: number = capScaleForConstrainedDevice(
+  _naturalDisplayScale(_nativeDpr),
+);
 
-export const getDisplayScaleOverride = (): number => _displayScaleOverride;
+export const getDisplayScaleOverride = (): number =>
+  capScaleForConstrainedDevice(_displayScaleOverride);
 
 export const setDisplayScaleOverride = (scale: number): void => {
   _displayScaleOverride = scale;
+};
+
+/** Re-apply constrained ceiling after device-budget refresh or width change. */
+export const syncDisplayScaleForDevice = (): void => {
+  if (!isConstrainedDevice()) return;
+  _displayScaleOverride = Math.min(
+    _displayScaleOverride,
+    CONSTRAINED_MAX_DISPLAY_SCALE,
+  );
 };

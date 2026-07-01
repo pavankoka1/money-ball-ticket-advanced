@@ -1,17 +1,30 @@
 import { TICKET_CELL_COUNT } from "@/lib/ticketDesign";
 import type { TicketSlot } from "@/lib/ticketLayout";
-import { TICKETS_PER_ROW, VIEWPORT_ROWS, type Ticket } from "@/types/ticket";
+import { getCatalogViewportRows } from "@/lib/catalogLayout";
+import {
+  getTicketGridColumns,
+  getLastLayoutCssWidth,
+  DESKTOP_TICKETS_PER_ROW,
+} from "@/lib/ticketGridLayout";
+import type { Ticket } from "@/types/ticket";
 import { HYBRID_DOM_ROW_BUFFER } from "./hybridDomSlots";
 
 /** Cards mounted per RAF on first pool warm-up (keeps each frame under long-task budget). */
 export const DOM_POOL_MOUNT_BATCH_SIZE = 4;
 
+function resolvePoolViewportRows(): number {
+  return getCatalogViewportRows(getLastLayoutCssWidth()) + 2 * HYBRID_DOM_ROW_BUFFER;
+}
+
 /**
  * Fixed pool — viewport rows + ±buffer rows above and below.
- * At buffer=4: (3 + 8) × 4 = 44 slots (~400 DOM nodes at ~9 nodes/card).
  */
 export const HYBRID_DOM_OVERLAY_POOL_SIZE =
-  TICKETS_PER_ROW * (VIEWPORT_ROWS + 2 * HYBRID_DOM_ROW_BUFFER);
+  DESKTOP_TICKETS_PER_ROW * resolvePoolViewportRows();
+
+export function getActiveDomPoolSlotCount(): number {
+  return getTicketGridColumns() * resolvePoolViewportRows();
+}
 
 export type DomPoolEntry = {
   ticket: Ticket;
@@ -24,6 +37,7 @@ export type DomPoolEntry = {
 export type DomPoolUpdateResult = {
   activeCount: number;
   changed: boolean;
+  changedIndices: number[];
 };
 
 export const DOM_POOL_PLACEHOLDER: Ticket = {
@@ -69,20 +83,29 @@ export function updateDomPoolEntriesInPlace(
 ): DomPoolUpdateResult {
   let activeCount = 0;
   let changed = false;
+  const changedIndices: number[] = [];
 
-  for (let i = 0; i < HYBRID_DOM_OVERLAY_POOL_SIZE; i++) {
+  const poolSize = getActiveDomPoolSlotCount();
+
+  for (let i = 0; i < poolSize; i++) {
     const entry = entries[i];
     const slot = slots[i];
 
     if (!slot) {
-      if (entry.active) changed = true;
+      if (entry.active) {
+        changed = true;
+        changedIndices.push(i);
+      }
       entry.active = false;
       continue;
     }
 
     const ticket = ticketsById.get(slot.id);
     if (!ticket) {
-      if (entry.active) changed = true;
+      if (entry.active) {
+        changed = true;
+        changedIndices.push(i);
+      }
       entry.active = false;
       continue;
     }
@@ -97,6 +120,7 @@ export function updateDomPoolEntriesInPlace(
     }
 
     changed = true;
+    changedIndices.push(i);
     entry.ticket = ticket;
     entry.x = x;
     entry.y = y;
@@ -105,7 +129,15 @@ export function updateDomPoolEntriesInPlace(
     activeCount++;
   }
 
-  return { activeCount, changed };
+  for (let i = poolSize; i < HYBRID_DOM_OVERLAY_POOL_SIZE; i++) {
+    const entry = entries[i];
+    if (!entry.active) continue;
+    changed = true;
+    changedIndices.push(i);
+    entry.active = false;
+  }
+
+  return { activeCount, changed, changedIndices };
 }
 
 export function countActiveDomPoolEntries(entries: readonly DomPoolEntry[]): number {

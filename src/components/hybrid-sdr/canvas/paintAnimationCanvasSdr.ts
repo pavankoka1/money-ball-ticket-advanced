@@ -1,15 +1,15 @@
 import {
-  getVisibleSlotIndexRange,
+  getShuffleAnimationEndpoints,
   lerp,
-  type ReorderTransition,
   type TicketSlot,
 } from "@/lib/ticketLayout";
 import { getSdrDisplayScale } from "@/lib/sdrDisplayScale";
-import { ROW_HEIGHT, TICKET_HEIGHT, type Ticket } from "@/types/ticket";
+import { getLayoutRowHeight } from "@/lib/ticketGridLayout";
+import { TICKET_HEIGHT, type Ticket } from "@/types/ticket";
 import {
   ANIMATION_MS,
   getEasingFn,
-  type ActiveAnimation,
+  type ActiveShuffleAnimation,
 } from "./animation";
 import { paintHybridTicketOnViewport } from "./hybridTicketRenderer";
 
@@ -18,9 +18,8 @@ export type PaintAnimationCanvasSdrArgs = {
   cssWidth: number;
   viewportHeight: number;
   scrollTop: number;
-  layout: readonly TicketSlot[];
   tickets: readonly Ticket[];
-  animation: ActiveAnimation;
+  animation: ActiveShuffleAnimation;
   now: number;
 };
 
@@ -44,19 +43,32 @@ function syncCanvas(
   return ctx;
 }
 
-function buildTransitionMap(transitions: ReorderTransition[]) {
-  const map = new Map<number, ReorderTransition>();
+function buildTransitionMap(
+  transitions: ActiveShuffleAnimation["viewportTransitions"],
+): Map<number, ActiveShuffleAnimation["viewportTransitions"][number]> {
+  const map = new Map<
+    number,
+    ActiveShuffleAnimation["viewportTransitions"][number]
+  >();
   for (const t of transitions) map.set(t.id, t);
   return map;
 }
 
-/** Sticky viewport canvas — domMatched hybrid sprites, same path as reference hybrid. */
+function buildSlotMap(layout: readonly TicketSlot[]): Map<number, TicketSlot> {
+  const map = new Map<number, TicketSlot>();
+  for (const slot of layout) map.set(slot.id, slot);
+  return map;
+}
+
+/**
+ * Sticky viewport canvas — viewport-band shuffle only; entering tickets start
+ * just above/below the visible strip.
+ */
 export function paintAnimationCanvasSdr({
   canvas,
   cssWidth,
   viewportHeight,
   scrollTop,
-  layout,
   tickets,
   animation,
   now,
@@ -67,36 +79,42 @@ export function paintAnimationCanvasSdr({
 
   const animT = Math.min(1, (now - animation.startTime) / ANIMATION_MS);
   const eased = getEasingFn(animation.easing)(animT);
-  const transitionById = buildTransitionMap(animation.transitions);
-  const verticalMargin = ROW_HEIGHT * 2;
+  const transitionById = buildTransitionMap(animation.viewportTransitions);
+  const nextSlotById = buildSlotMap(animation.nextLayout);
+  const ticketById = new Map(tickets.map((t) => [t.id, t]));
+  const verticalMargin = getLayoutRowHeight();
   const displayScale = getSdrDisplayScale();
   const animating = animT < 1;
 
-  const { startIndex, endIndex } = getVisibleSlotIndexRange(
-    layout.length,
-    scrollTop,
-    viewportHeight,
-    verticalMargin,
-  );
-
-  for (let i = startIndex; i < endIndex; i++) {
-    const slot = layout[i];
-    if (!slot) continue;
-    const ticket = tickets[slot.index];
+  for (const id of animation.drawIds) {
+    const ticket = ticketById.get(id);
     if (!ticket) continue;
 
-    let x = slot.x;
-    let y = slot.y;
+    const transition = transitionById.get(id);
+    const nextSlot = nextSlotById.get(id);
 
-    const transition = transitionById.get(slot.id);
+    let x: number;
+    let y: number;
+    let cardWidth = nextSlot?.cardWidth;
+
     if (transition) {
-      if (animT < 1) {
-        x = lerp(transition.fromX, transition.toX, eased);
-        y = lerp(transition.fromY, transition.toY, eased);
-      } else {
-        x = transition.toX;
-        y = transition.toY;
-      }
+      const endpoints = getShuffleAnimationEndpoints(
+        transition,
+        scrollTop,
+        viewportHeight,
+      );
+      x = animating
+        ? lerp(endpoints.fromX, endpoints.toX, eased)
+        : endpoints.toX;
+      y = animating
+        ? lerp(endpoints.fromY, endpoints.toY, eased)
+        : endpoints.toY;
+    } else if (nextSlot) {
+      x = nextSlot.x;
+      y = nextSlot.y;
+      cardWidth = nextSlot.cardWidth;
+    } else {
+      continue;
     }
 
     const viewY = y - scrollTop;
@@ -110,6 +128,13 @@ export function paintAnimationCanvasSdr({
     const drawX = animating ? x : Math.round(x);
     const drawY = animating ? viewY : Math.round(viewY);
 
-    paintHybridTicketOnViewport(ctx, ticket, drawX, drawY, displayScale);
+    paintHybridTicketOnViewport(
+      ctx,
+      ticket,
+      drawX,
+      drawY,
+      displayScale,
+      cardWidth,
+    );
   }
 }

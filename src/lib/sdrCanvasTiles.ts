@@ -1,5 +1,15 @@
-import { ROW_GAP, ROW_HEIGHT, getTotalRows } from "@/types/ticket";
-import { getMaxTileCssHeight } from "@/lib/deviceMemoryBudget";
+import { getTotalRows } from "@/types/ticket";
+import {
+  getLayoutRowGap,
+  getLayoutRowHeight,
+} from "@/lib/ticketGridLayout";
+import {
+  getMaxTileCssHeight,
+  getResidentTileBudget,
+  isConstrainedDevice,
+  resolveMaxRowsPerTileForMemory,
+  resolveMemoryBudgetedCompositorScale,
+} from "@/lib/deviceMemoryBudget";
 
 /** Legacy cap — row alignment takes precedence. */
 export const SDR_TILE_MAX_CSS_HEIGHT = 3600;
@@ -29,27 +39,59 @@ export function resolveSdrTileMaxCssHeight(compositorScale: number): number {
 }
 
 /** Max complete ticket rows per tile — never split a row across tiles. */
-export function resolveMaxRowsPerTile(compositorScale: number): number {
+export function resolveMaxRowsPerTile(
+  compositorScale: number,
+  cssWidth = 0,
+): number {
   const maxCss = resolveSdrTileMaxCssHeight(compositorScale);
-  return Math.max(1, Math.floor((maxCss + ROW_GAP) / ROW_HEIGHT));
+  const rowHeight = getLayoutRowHeight();
+  const rowGap = getLayoutRowGap();
+  let maxRows = Math.max(1, Math.floor((maxCss + rowGap) / rowHeight));
+  if (cssWidth > 0) {
+    maxRows = Math.min(
+      maxRows,
+      resolveMaxRowsPerTileForMemory(cssWidth, compositorScale),
+    );
+  }
+  return maxRows;
+}
+
+/** Compositor scale for tile planning — memory-capped when `cssWidth` is known. */
+export function resolveSdrCompositorScaleForLayout(
+  naturalScale: number,
+  cssWidth: number,
+): number {
+  return resolveMemoryBudgetedCompositorScale(
+    naturalScale,
+    cssWidth,
+    getMaxTileCssHeight(),
+  );
 }
 
 export function getRowBandCssHeight(
   startRow: number,
   endRow: number,
   totalRows: number,
+  rowHeight = getLayoutRowHeight(),
+  rowGap = getLayoutRowGap(),
 ): number {
   if (endRow <= startRow) return 0;
   const rows = endRow - startRow;
-  const height = rows * ROW_HEIGHT;
-  return endRow < totalRows ? height - ROW_GAP : height;
+  const height = rows * rowHeight;
+  return endRow < totalRows ? height - rowGap : height;
 }
 
 export function buildSdrTilePlan(
   ticketCount: number,
   compositorScale: number,
+  cssWidth = 0,
 ): SdrTilePlan[] {
+  const scale =
+    cssWidth > 0
+      ? resolveSdrCompositorScaleForLayout(compositorScale, cssWidth)
+      : compositorScale;
   const totalRows = getTotalRows(ticketCount);
+  const rowHeight = getLayoutRowHeight();
   if (totalRows <= 0) {
     return [
       {
@@ -63,7 +105,7 @@ export function buildSdrTilePlan(
     ];
   }
 
-  const maxRowsPerTile = resolveMaxRowsPerTile(compositorScale);
+  const maxRowsPerTile = resolveMaxRowsPerTile(scale, cssWidth);
   const tileCount = Math.max(1, Math.ceil(totalRows / maxRowsPerTile));
   const plans: SdrTilePlan[] = [];
 
@@ -75,8 +117,8 @@ export function buildSdrTilePlan(
       tileCount,
       startRow,
       endRow,
-      cssTop: startRow * ROW_HEIGHT,
-      cssHeight: getRowBandCssHeight(startRow, endRow, totalRows),
+      cssTop: startRow * rowHeight,
+      cssHeight: getRowBandCssHeight(startRow, endRow, totalRows, rowHeight),
     });
   }
 
@@ -86,8 +128,9 @@ export function buildSdrTilePlan(
 export function computeSdrTileCount(
   ticketCount: number,
   compositorScale: number,
+  cssWidth = 0,
 ): number {
-  return buildSdrTilePlan(ticketCount, compositorScale)[0]?.tileCount ?? 1;
+  return buildSdrTilePlan(ticketCount, compositorScale, cssWidth)[0]?.tileCount ?? 1;
 }
 
 /** @deprecated Prefer buildSdrTilePlan — kept for callers using css height. */
@@ -104,16 +147,18 @@ export function getSdrTileCssHeight(
   tileIndex: number,
   ticketCount: number,
   compositorScale: number,
+  cssWidth = 0,
 ): number {
-  return buildSdrTilePlan(ticketCount, compositorScale)[tileIndex]?.cssHeight ?? 0;
+  return buildSdrTilePlan(ticketCount, compositorScale, cssWidth)[tileIndex]?.cssHeight ?? 0;
 }
 
 export function getSdrTileTopCss(
   tileIndex: number,
   ticketCount: number,
   compositorScale: number,
+  cssWidth = 0,
 ): number {
-  return buildSdrTilePlan(ticketCount, compositorScale)[tileIndex]?.cssTop ?? 0;
+  return buildSdrTilePlan(ticketCount, compositorScale, cssWidth)[tileIndex]?.cssTop ?? 0;
 }
 
 /** Inclusive-exclusive tile index range kept resident for virtualization. */
@@ -130,8 +175,9 @@ export function computeVisibleTileRange(
   ticketCount: number,
   compositorScale: number,
   maxTiles: number,
+  cssWidth = 0,
 ): SdrTileWindow {
-  const plans = buildSdrTilePlan(ticketCount, compositorScale);
+  const plans = buildSdrTilePlan(ticketCount, compositorScale, cssWidth);
   const tileCount = plans[0]?.tileCount ?? 1;
 
   if (!Number.isFinite(maxTiles) || maxTiles >= tileCount) {
@@ -170,6 +216,88 @@ export function computeVisibleTileRange(
   }
 
   return { start, end };
+}
+
+function isResidentCanvasTile(canvas: HTMLCanvasElement | null | undefined): boolean {
+  return (
+    canvas !== null &&
+    canvas !== undefined &&
+    canvas.width > 1 &&
+    canvas.height > 1 &&
+    canvas.style.visibility !== "hidden"
+  );
+}
+
+/** True when any tile overlapping the viewport is missing or released. */
+export function viewportNeedsCanvasTiles(
+  tileCanvases: readonly (HTMLCanvasElement | null)[],
+  scrollTop: number,
+  viewportHeight: number,
+  ticketCount: number,
+  compositorScale: number,
+  cssWidth = 0,
+): boolean {
+  const plans = buildSdrTilePlan(ticketCount, compositorScale, cssWidth);
+  const viewTop = scrollTop;
+  const viewBottom = scrollTop + viewportHeight;
+
+  for (const plan of plans) {
+    const top = plan.cssTop;
+    const bottom = plan.cssTop + plan.cssHeight;
+    if (bottom <= viewTop || top >= viewBottom) continue;
+    if (!isResidentCanvasTile(tileCanvases[plan.tileIndex])) return true;
+  }
+  return false;
+}
+
+/** Stable key for the resident tile window at the current scroll position. */
+export function getScrollTileBandKey(
+  scrollTop: number,
+  viewportHeight: number,
+  ticketCount: number,
+  compositorScale: number,
+  maxTiles: number,
+  cssWidth = 0,
+): number {
+  const { start, end } = computeVisibleTileRange(
+    scrollTop,
+    viewportHeight,
+    ticketCount,
+    compositorScale,
+    maxTiles,
+    cssWidth,
+  );
+  return start * 65536 + end;
+}
+
+/** Keep every tile resident when the full grid fits the phone tab canvas budget at 2×. */
+const MAX_CONSTRAINED_TAB_TILE_BYTES = 96 * 1024 * 1024;
+
+export function resolveResidentTileBudgetForGrid(
+  ticketCount: number,
+  compositorScale: number,
+  cssWidth: number,
+): number {
+  if (!isConstrainedDevice() || cssWidth <= 0 || ticketCount <= 0) {
+    return getResidentTileBudget();
+  }
+
+  const plans = buildSdrTilePlan(ticketCount, compositorScale, cssWidth);
+  const tileCount = plans[0]?.tileCount ?? 1;
+  const scale = resolveSdrCompositorScaleForLayout(compositorScale, cssWidth);
+
+  let totalBytes = 0;
+  for (const plan of plans) {
+    const w = Math.max(1, Math.round(cssWidth * scale));
+    const h = Math.max(1, Math.round(plan.cssHeight * scale));
+    totalBytes += w * h * 4;
+  }
+
+  if (totalBytes <= MAX_CONSTRAINED_TAB_TILE_BYTES) {
+    return tileCount;
+  }
+
+  return Math.min(getResidentTileBudget(), tileCount);
 }
 
 export function assertTileFitsPhysical(cssHeight: number, displayScale: number): void {

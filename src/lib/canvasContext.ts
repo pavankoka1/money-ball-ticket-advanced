@@ -185,6 +185,7 @@ export const blitTicketSpriteToViewport = (
   logicalW: number,
   logicalH: number,
   displayScale: number,
+  options?: { allowScale?: boolean },
 ): boolean => {
   const destBufferW = Math.max(1, Math.round(logicalW * displayScale));
   const destBufferH = Math.max(1, Math.round(logicalH * displayScale));
@@ -193,12 +194,16 @@ export const blitTicketSpriteToViewport = (
     destBufferW,
     destBufferH,
   );
-  if (spriteW !== destBufferW || spriteH !== destBufferH) {
+  const exactSize = spriteW === destBufferW && spriteH === destBufferH;
+  if (!exactSize && !options?.allowScale) {
     return false;
   }
 
   ctx.save();
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = exactSize ? false : true;
+  if ("imageSmoothingQuality" in ctx) {
+    ctx.imageSmoothingQuality = exactSize ? "low" : "high";
+  }
   ctx.drawImage(sprite, 0, 0, spriteW, spriteH, x, y, logicalW, logicalH);
   ctx.restore();
   return true;
